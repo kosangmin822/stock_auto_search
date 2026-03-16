@@ -17,7 +17,7 @@ class Config:
     KIS_SECRET_KEY = os.getenv("KIS_SECRET_KEY")
     KIS_ACCOUNT_NUMBER = os.getenv("KIS_ACCOUNT_NUMBER")
     KIS_ACCOUNT_TYPE = os.getenv("KIS_ACCOUNT_TYPE")
-    KIS_SERVER_URL = os.getenv("KIS_SERVER_URL", "https://openapi.kiwoom.com/stub")
+    KIS_BASE_URL = os.getenv("KIS_BASE_URL", "https://openapivts.koreainvestment.com:29443")
     
     # 로깅 설정
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

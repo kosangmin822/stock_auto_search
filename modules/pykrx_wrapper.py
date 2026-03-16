@@ -5,10 +5,24 @@ pykrx를 사용하여 주식 데이터 조회 기능을 포함합니다.
 
 import pandas as pd
 from pykrx import stock
-from datetime import datetime
+from datetime import datetime, timedelta
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# 인기 있는 주식 코드 (추가 로드 실패 시 사용)
+POPULAR_STOCKS = {
+    "005930": "삼성전자",
+    "000660": "SK하이닉스",
+    "068270": "셀트리온",
+    "035720": "카카오",
+    "051910": "LG화학",
+    "006400": "삼성SDI",
+    "207940": "삼성바이오로직스",
+    "035390": "스킨앤스킨",
+    "028300": "HLB",
+    "000100": "유한양행",
+}
 
 
 class PyKRXWrapper:
@@ -45,8 +59,23 @@ class PyKRXWrapper:
         """
         try:
             logger.info(f"Fetching stock info - {stock_code}")
-            name = stock.get_market_ticker_name(stock_code)
-            return {"code": stock_code, "name": name}
+            
+            # 인기 주식 목록에서 먼저 확인
+            if stock_code in POPULAR_STOCKS:
+                return {"code": stock_code, "name": POPULAR_STOCKS[stock_code]}
+            
+            # 온라인에서 조회
+            try:
+                name = stock.get_market_ticker_name(stock_code)
+                return {"code": stock_code, "name": name}
+            except Exception as e:
+                logger.debug(f"Failed to fetch from online: {str(e)}")
+                # 실패 시 인기 주식 목록에서 찾기
+                if stock_code in POPULAR_STOCKS:
+                    return {"code": stock_code, "name": POPULAR_STOCKS[stock_code]}
+                else:
+                    logger.warning(f"Stock info not found: {stock_code}")
+                    return None
         except Exception as e:
             logger.error(f"Failed to get stock info: {str(e)}")
             return None
@@ -64,8 +93,14 @@ class PyKRXWrapper:
             pd.DataFrame: OHLCV 데이터
         """
         try:
+            from datetime import timedelta
+            
             if end_date is None:
                 end_date = datetime.now().strftime("%Y%m%d")
+            
+            if start_date is None:
+                # 기본값: 1년 전
+                start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
             
             logger.info(
                 f"Fetching daily OHLCV - {stock_code}, "
@@ -94,8 +129,17 @@ class PyKRXWrapper:
         """
         try:
             logger.info(f"Fetching current price - {stock_code}")
-            price = stock.get_current_price(stock_code)
-            return price
+            # 오늘 날짜 OHLCV 데이터에서 종가 추출
+            today = datetime.now().strftime("%Y%m%d")
+            ohlcv = stock.get_market_ohlcv(fromdate=today, todate=today, ticker=stock_code)
+            
+            if ohlcv is not None and len(ohlcv) > 0:
+                # 종가(Close) 값 반환
+                close_price = ohlcv.iloc[-1]['종가'] if '종가' in ohlcv.columns else ohlcv.iloc[-1][3]
+                return close_price
+            else:
+                logger.warning(f"No price data available for {stock_code}")
+                return None
         except Exception as e:
             logger.error(f"Failed to get current price: {str(e)}")
             return None
@@ -112,21 +156,40 @@ class PyKRXWrapper:
         """
         try:
             logger.info(f"Searching stock by name - {keyword}")
-            stock_list = stock.get_market_ticker_list(market="ALL")
+            
             results = []
             
-            for code in stock_list:
+            # 먼저 인기 주식 목록에서 검색
+            for code, name in POPULAR_STOCKS.items():
+                if keyword.upper() in name.upper() or keyword in code:
+                    results.append({"code": code, "name": name})
+            
+            if results:
+                return results
+            
+            # 온라인 데이터에서 검색 시도
+            for market in ["KOSPI", "KOSDAQ", "KONEX"]:
                 try:
-                    name = stock.get_market_ticker_name(code)
-                    if keyword.upper() in name.upper() or keyword in code:
-                        results.append({"code": code, "name": name})
-                except:
+                    stock_list = stock.get_market_ticker_list(market=market)
+                    if stock_list is None or len(stock_list) == 0:
+                        continue
+                    
+                    for code in stock_list:
+                        try:
+                            name = stock.get_market_ticker_name(code)
+                            if keyword.upper() in name.upper() or keyword in code:
+                                results.append({"code": code, "name": name})
+                        except Exception as inner_e:
+                            logger.debug(f"Skipping {code}: {str(inner_e)}")
+                            continue
+                except Exception as market_e:
+                    logger.debug(f"Market {market} search failed: {str(market_e)}")
                     continue
             
-            return results
+            return results if results else []
         except Exception as e:
             logger.error(f"Failed to search stock: {str(e)}")
-            return None
+            return []
     
     def get_market_cap(self, stock_code):
         """

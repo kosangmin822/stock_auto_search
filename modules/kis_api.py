@@ -20,7 +20,7 @@ class KISAPIWrapper:
         self.secret_key = Config.KIS_SECRET_KEY
         self.account_number = Config.KIS_ACCOUNT_NUMBER
         self.account_type = Config.KIS_ACCOUNT_TYPE
-        self.server_url = Config.KIS_SERVER_URL
+        self.base_url = Config.KIS_BASE_URL
         self.session = requests.Session()
         self.access_token = None
         logger.info("KIS API Wrapper initialized")

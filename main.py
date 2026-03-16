@@ -122,8 +122,10 @@ def main():
     # 예제: 삼성전자 검색
     print("[1] 주식 검색 예제")
     search_result = system.search_stock("삼성전자")
-    if search_result:
+    if search_result and len(search_result) > 0:
         print(f"검색 결과: {search_result}")
+    else:
+        print("검색 결과가 없습니다. 종목 코드로 검색해주세요.")
     print()
     
     # 예제: 가격 이력 조회
