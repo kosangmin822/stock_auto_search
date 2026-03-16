@@ -5,6 +5,12 @@
 
 from main import StockAutoSearch
 from modules.pykrx_wrapper import PyKRXWrapper
+from modules.kis_api import KISAPIWrapper
+from config.config import Config
+import urllib3
+
+# SSL 경고 제거 (VTS 환경용)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def test_stock_search():
@@ -105,8 +111,54 @@ def test_account_info():
     print("\n▶ 계좌 잔액:")
     balance = system.get_balance()
     print(f"  {balance}")
+
+
+def test_kis_authentication():
+    """KIS API 인증 테스트"""
+    print("\n" + "="*60)
+    print("[테스트 6] KIS API 인증")
+    print("="*60)
     
-    print("\n📌 주의: KIS API 인증이 구현되지 않아 빈 값이 출력됩니다.")
+    print("\n▶ 설정 검증:")
+    try:
+        Config.validate()
+        print("  ✅ 필수 설정값 확인됨")
+        print(f"    - API KEY: {Config.KIS_API_KEY[:10]}***")
+        print(f"    - 계좌번호: {Config.KIS_ACCOUNT_NUMBER}")
+        print(f"    - 계좌종류: {Config.KIS_ACCOUNT_TYPE}")
+        print(f"    - Base URL: {Config.KIS_BASE_URL}")
+    except ValueError as e:
+        print(f"  ❌ 설정 오류: {str(e)}")
+        return
+    
+    kis = KISAPIWrapper()
+    
+    print("\n▶ KIS API 인증 시도:")
+    if kis.authenticate():
+        print("  ✅ 인증 성공!")
+        print(f"  - 토큰 타입: {kis.token_type}")
+        print(f"  - 액세스 토큰: {kis.access_token[:20]}***")
+        
+        # 인증 후 계좌 정보 조회
+        print("\n▶ 계좌 정보 조회:")
+        account_info = kis.get_account_info()
+        if account_info:
+            print(f"  ✅ 계좌 정보: {account_info}")
+        else:
+            print("  ⚠️  계좌 정보 조회 실패")
+        
+        # 인증 후 잔액 조회
+        print("\n▶ 계좌 잔액 조회:")
+        balance = kis.get_balance()
+        if balance:
+            print(f"  ✅ 잔액 정보: {balance}")
+        else:
+            print("  ⚠️  잔액 조회 실패")
+    else:
+        print("  ❌ 인증 실패!")
+        print("     - API 자격증명 확인")
+        print("     - 네트워크 연결 확인")
+        print("     - VTS 서버 접근 권한 확인")
 
 
 def main():
@@ -123,6 +175,7 @@ def main():
         test_price_history()
         test_current_price()
         test_stock_info()
+        test_kis_authentication()  # KIS API 인증 테스트 추가
         test_account_info()
         
         print("\n" + "="*60)
