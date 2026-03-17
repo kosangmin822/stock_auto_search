@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from config.config import Config
@@ -210,25 +211,70 @@ def _build_indicator_frame(history: pd.DataFrame) -> pd.DataFrame:
     return chart
 
 
-def _render_candlestick_chart(chart: pd.DataFrame, overlay_fields: List[str], stock_code: str, chart_mode: str) -> None:
+def _render_candlestick_chart(
+    chart: pd.DataFrame,
+    overlay_fields: List[str],
+    stock_code: str,
+    chart_mode: str,
+    show_volume: bool,
+    show_rsi: bool,
+    show_macd: bool,
+) -> None:
     if chart.empty:
         st.info("No chart data available for this timeframe.")
         return
 
-    figure = go.Figure()
+    source = chart.copy().sort_values("date").reset_index(drop=True)
+    label_format = "%Y-%m-%d %H:%M" if chart_mode == "minute" else "%Y-%m-%d"
+    source["x_label"] = pd.to_datetime(source["date"]).dt.strftime(label_format)
+
+    panel_specs = [("price", 0.62)]
+    if show_volume:
+        panel_specs.append(("volume", 0.16))
+    if show_rsi:
+        panel_specs.append(("rsi", 0.11))
+    if show_macd:
+        panel_specs.append(("macd", 0.11))
+
+    row_count = len(panel_specs)
+    row_heights = [height for _, height in panel_specs]
+    subplot_titles = [name.upper() for name, _ in panel_specs]
+    figure = make_subplots(
+        rows=row_count,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=row_heights,
+        subplot_titles=subplot_titles,
+    )
+
+    row_map = {}
+    for index, (name, _) in enumerate(panel_specs, start=1):
+        row_map[name] = index
+
     figure.add_trace(
         go.Candlestick(
-            x=chart["date"],
-            open=chart["open"],
-            high=chart["high"],
-            low=chart["low"],
-            close=chart["close"],
+            x=source["x_label"],
+            open=source["open"],
+            high=source["high"],
+            low=source["low"],
+            close=source["close"],
             increasing_line_color=RISE_COLOR,
             decreasing_line_color=FALL_COLOR,
             increasing_fillcolor=RISE_COLOR,
             decreasing_fillcolor=FALL_COLOR,
             name="Price",
-        )
+            customdata=source[["date"]],
+            hovertemplate=(
+                "Time: %{customdata[0]|%Y-%m-%d %H:%M}<br>"
+                "Open: %{open:,}<br>"
+                "High: %{high:,}<br>"
+                "Low: %{low:,}<br>"
+                "Close: %{close:,}<extra></extra>"
+            ),
+        ),
+        row=row_map["price"],
+        col=1,
     )
 
     overlay_colors = {
@@ -240,35 +286,114 @@ def _render_candlestick_chart(chart: pd.DataFrame, overlay_fields: List[str], st
         "BB_LOWER": "#94a3b8",
     }
     for field in overlay_fields:
-        if field not in chart.columns:
+        if field not in source.columns:
             continue
-        data = chart[["date", field]].dropna()
+        data = source[["x_label", field]].dropna()
         if data.empty:
             continue
         figure.add_trace(
             go.Scatter(
-                x=data["date"],
+                x=data["x_label"],
                 y=data[field],
                 mode="lines",
                 line={"color": overlay_colors.get(field, LINE_COLOR), "width": 2},
                 name=field,
-            )
+                hovertemplate=f"{field}: %{{y:,.2f}}<extra></extra>",
+            ),
+            row=row_map["price"],
+            col=1,
         )
+
+    if show_volume:
+        colors = [RISE_COLOR if close >= open_ else FALL_COLOR for open_, close in zip(source["open"], source["close"])]
+        figure.add_trace(
+            go.Bar(
+                x=source["x_label"],
+                y=source["volume"],
+                marker_color=colors,
+                name="Volume",
+                hovertemplate="Volume: %{y:,}<extra></extra>",
+            ),
+            row=row_map["volume"],
+            col=1,
+        )
+
+    if show_rsi:
+        rsi_data = source[["x_label", "RSI14"]].dropna()
+        if not rsi_data.empty:
+            figure.add_trace(
+                go.Scatter(
+                    x=rsi_data["x_label"],
+                    y=rsi_data["RSI14"],
+                    mode="lines",
+                    line={"color": "#7c3aed", "width": 2},
+                    name="RSI14",
+                    hovertemplate="RSI14: %{y:,.2f}<extra></extra>",
+                ),
+                row=row_map["rsi"],
+                col=1,
+            )
+            figure.add_hline(y=70, line_dash="dot", line_color="#d0d5dd", row=row_map["rsi"], col=1)
+            figure.add_hline(y=30, line_dash="dot", line_color="#d0d5dd", row=row_map["rsi"], col=1)
+
+    if show_macd:
+        macd_data = source[["x_label", "MACD", "MACD_SIGNAL"]].dropna(how="all")
+        if not macd_data.empty:
+            figure.add_trace(
+                go.Scatter(
+                    x=macd_data["x_label"],
+                    y=macd_data["MACD"],
+                    mode="lines",
+                    line={"color": "#0f766e", "width": 2},
+                    name="MACD",
+                    hovertemplate="MACD: %{y:,.2f}<extra></extra>",
+                ),
+                row=row_map["macd"],
+                col=1,
+            )
+            signal_data = macd_data.dropna(subset=["MACD_SIGNAL"])
+            if not signal_data.empty:
+                figure.add_trace(
+                    go.Scatter(
+                        x=signal_data["x_label"],
+                        y=signal_data["MACD_SIGNAL"],
+                        mode="lines",
+                        line={"color": "#f97316", "width": 2},
+                        name="MACD Signal",
+                        hovertemplate="Signal: %{y:,.2f}<extra></extra>",
+                    ),
+                    row=row_map["macd"],
+                    col=1,
+                )
+            figure.add_hline(y=0, line_dash="dot", line_color="#d0d5dd", row=row_map["macd"], col=1)
 
     label_map = {"minute": "Minute", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
     figure.update_layout(
         title=f"{stock_code} {label_map.get(chart_mode, chart_mode)}",
-        height=460,
-        margin={"l": 12, "r": 12, "t": 44, "b": 12},
+        height=520 + max(0, row_count - 1) * 120,
+        margin={"l": 12, "r": 12, "t": 48, "b": 12},
         plot_bgcolor="#ffffff",
         paper_bgcolor="rgba(0,0,0,0)",
-        xaxis={"showgrid": True, "gridcolor": "#f2f4f7", "rangeslider": {"visible": False}, "type": "date"},
-        yaxis={"showgrid": True, "gridcolor": "#f2f4f7", "side": "right"},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0},
         dragmode="pan",
         hovermode="x unified",
+        bargap=0.15,
     )
-    st.caption("Mouse wheel zoom and drag pan are enabled.")
+
+    for row_index in range(1, row_count + 1):
+        figure.update_xaxes(
+            showgrid=True,
+            gridcolor="#f2f4f7",
+            type="category",
+            categoryorder="array",
+            categoryarray=source["x_label"].tolist(),
+            row=row_index,
+            col=1,
+        )
+        figure.update_yaxes(showgrid=True, gridcolor="#f2f4f7", side="right", row=row_index, col=1)
+
+    figure.update_xaxes(rangeslider_visible=False, row=row_map["price"], col=1)
+    st.caption("Mouse wheel zoom and drag pan are synchronized across the main chart and indicator panels. Non-trading days are skipped.")
     st.plotly_chart(
         figure,
         width="stretch",
@@ -369,14 +494,15 @@ def _render_chart_panel(item: Dict[str, object]) -> None:
         if show_boll:
             overlays.extend(["BB_UPPER", "BB_MID", "BB_LOWER"])
 
-        _render_candlestick_chart(chart, overlays, stock_code, chart_mode)
-        chart_display = chart.set_index("date")
-        if show_volume:
-            st.bar_chart(chart_display[["volume"]].dropna(how="all"), width="stretch", height=180)
-        if show_rsi:
-            st.line_chart(chart_display[["RSI14"]].dropna(how="all"), width="stretch", height=180)
-        if show_macd:
-            st.line_chart(chart_display[["MACD", "MACD_SIGNAL"]].dropna(how="all"), width="stretch", height=180)
+        _render_candlestick_chart(
+            chart,
+            overlays,
+            stock_code,
+            chart_mode,
+            show_volume=show_volume,
+            show_rsi=show_rsi,
+            show_macd=show_macd,
+        )
 
 
 def _render_snapshot_card(item: Dict[str, object]) -> None:
