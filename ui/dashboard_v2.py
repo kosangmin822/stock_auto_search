@@ -65,9 +65,9 @@ def _inject_styles() -> None:
         .flat { color: #101828; }
         .muted { color: #596761; }
         .detail-grid { display:grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap:0.55rem; margin-top:0.8rem; margin-bottom:0.8rem; }
-        .detail-cell { background: rgba(255,255,255,0.72); border:1px solid rgba(19, 35, 28, 0.08); border-radius:14px; padding:0.7rem 0.8rem; }
+        .detail-cell { background: rgba(255,255,255,0.72); border:1px solid rgba(19, 35, 28, 0.08); border-radius:14px; padding:0.7rem 0.8rem; min-height:5.4rem; display:flex; flex-direction:column; justify-content:flex-start; }
         .detail-label { color: #596761; font-size:0.74rem; margin-bottom:0.2rem; }
-        .detail-value { font-size:1rem; font-weight:700; font-family: 'Space Grotesk', 'Noto Sans KR', sans-serif; }
+        .detail-value { font-size:0.93rem; font-weight:700; font-family: 'Space Grotesk', 'Noto Sans KR', sans-serif; word-break:break-all; }
         .panel-wrap { background: rgba(255,255,255,0.78); border: 1px solid rgba(19, 35, 28, 0.08); border-radius: 18px; padding: 0.9rem 1rem; margin-bottom: 0.85rem; }
         .panel-title { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; color: #596761; margin-bottom: 0.7rem; font-weight: 700; }
         .panel-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.6rem; }
@@ -295,6 +295,7 @@ def _build_indicator_frame(history: pd.DataFrame) -> pd.DataFrame:
     chart = history.copy()
     close = chart["close"].astype(float)
     chart["MA5"] = close.rolling(5).mean()
+    chart["MA10"] = close.rolling(10).mean()
     chart["MA20"] = close.rolling(20).mean()
     chart["MA60"] = close.rolling(60).mean()
     middle = close.rolling(20).mean()
@@ -460,6 +461,7 @@ def _render_candlestick_chart(
     const macdTooltip = document.getElementById('macd-tooltip');
     const syncChannel = (payload.syncGroup && typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('stock_auto_search_' + payload.syncGroup) : null;
     let syncing = false;
+    let crosshairSyncing = false;
     let lastRangeKey = '';
 
     function paneStyle(height) {{
@@ -495,7 +497,7 @@ def _render_candlestick_chart(
     candleSeries.setData(payload.candles);
 
     const overlaySeriesMap = {{}};
-    const overlayColors = {{ MA5:'#f97316', MA20:'#0f766e', MA60:'#7c3aed', BB_UPPER:'#94a3b8', BB_MID:'#64748b', BB_LOWER:'#94a3b8' }};
+    const overlayColors = {{ MA5:'#f97316', MA10:'#06b6d4', MA20:'#0f766e', MA60:'#7c3aed', BB_UPPER:'#94a3b8', BB_MID:'#64748b', BB_LOWER:'#94a3b8' }};
     Object.entries(payload.overlays || {{}}).forEach(([name, data]) => {{
       const series = priceChart.addLineSeries({{ color: overlayColors[name] || '{LINE_COLOR}', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
       series.setData(data);
@@ -574,6 +576,15 @@ def _render_candlestick_chart(
       const macdPoint = macdMap.get(timeKey); const signalPoint = signalMap.get(timeKey); if ((macdPoint && macdPoint.value !== undefined) || (signalPoint && signalPoint.value !== undefined)) {{ const macdLines = ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>']; if (macdPoint && macdPoint.value !== undefined) macdLines.push('MACD ' + formatNumber(macdPoint.value)); if (signalPoint && signalPoint.value !== undefined) macdLines.push('Signal ' + formatNumber(signalPoint.value)); showTooltip(macdTooltip, macdLines); }} else hideTooltip(macdTooltip);
     }}
     charts.forEach((chart) => chart.subscribeCrosshairMove(renderAllTooltips));
+    priceChart.subscribeCrosshairMove((param) => {{
+      if (crosshairSyncing || !syncChannel) return;
+      if (param && param.time) {{
+        const timeKey = buildTimeKey(param.time);
+        if (timeKey) syncChannel.postMessage({{ type: 'crosshair', source: payload.chartId, timeKey }});
+      }} else {{
+        syncChannel.postMessage({{ type: 'crosshair_clear', source: payload.chartId }});
+      }}
+    }});
 
     function serializeTime(value) {{
       if (value === null || value === undefined) return '';
@@ -596,9 +607,28 @@ def _render_candlestick_chart(
     if (syncChannel) {{
       syncChannel.onmessage = (event) => {{
         const message = event.data || {{}};
-        if (message.source === payload.chartId || message.type !== 'range' || !message.range) return;
-        if (message.key && message.key === lastRangeKey) return;
-        applyRange(message.range);
+        if (message.source === payload.chartId) return;
+        if (message.type === 'range') {{
+          if (!message.range) return;
+          if (message.key && message.key === lastRangeKey) return;
+          applyRange(message.range);
+        }} else if (message.type === 'crosshair') {{
+          const candle = candleMap.get(message.timeKey);
+          if (!candle) return;
+          crosshairSyncing = true;
+          priceChart.setCrosshairPosition(candle.close, candle.time, candleSeries);
+          if (volumeChart && volumeSeries) {{ const vp = volumeMap.get(message.timeKey); if (vp) volumeChart.setCrosshairPosition(vp.value, candle.time, volumeSeries); }}
+          if (rsiChart && rsiSeries) {{ const rp = rsiMap.get(message.timeKey); if (rp) rsiChart.setCrosshairPosition(rp.value, candle.time, rsiSeries); }}
+          if (macdChart && macdSeries) {{ const mp = macdMap.get(message.timeKey); if (mp) macdChart.setCrosshairPosition(mp.value, candle.time, macdSeries); }}
+          crosshairSyncing = false;
+        }} else if (message.type === 'crosshair_clear') {{
+          crosshairSyncing = true;
+          priceChart.clearCrosshairPosition();
+          if (volumeChart) volumeChart.clearCrosshairPosition();
+          if (rsiChart) rsiChart.clearCrosshairPosition();
+          if (macdChart) macdChart.clearCrosshairPosition();
+          crosshairSyncing = false;
+        }}
       }};
     }}
     const total = payload.candles.length; const visible = Math.max(1, payload.initialVisible || 100); const fromIndex = Math.max(0, total - visible); const toIndex = Math.max(total - 1, 0); applyRange({{ from: payload.candles[fromIndex].time, to: payload.candles[toIndex].time }});
@@ -684,25 +714,71 @@ def _render_chart_panel(
                 disabled=chart_mode == "minute",
                 key=f"full_history_{chart_prefix}_{stock_code}",
             )
-            show_ma5 = st.checkbox("MA5", value=True, key=f"ma5_{chart_prefix}_{stock_code}")
-            show_ma20 = st.checkbox("MA20", value=True, key=f"ma20_{chart_prefix}_{stock_code}")
-            show_ma60 = st.checkbox("MA60", value=False, key=f"ma60_{chart_prefix}_{stock_code}")
-            show_boll = st.checkbox("Bollinger", value=False, key=f"boll_{chart_prefix}_{stock_code}")
-            show_volume = st.checkbox("Volume", value=True, key=f"volume_{chart_prefix}_{stock_code}")
-            show_rsi = st.checkbox("RSI14", value=False, key=f"rsi_{chart_prefix}_{stock_code}")
-            show_macd = st.checkbox("MACD", value=False, key=f"macd_{chart_prefix}_{stock_code}")
+            ind_cols = st.columns(8)
+            show_ma5   = ind_cols[0].checkbox("MA5",       value=True,  key=f"ma5_{chart_prefix}_{stock_code}")
+            show_ma10  = ind_cols[1].checkbox("MA10",      value=False, key=f"ma10_{chart_prefix}_{stock_code}")
+            show_ma20  = ind_cols[2].checkbox("MA20",      value=True,  key=f"ma20_{chart_prefix}_{stock_code}")
+            show_ma60  = ind_cols[3].checkbox("MA60",      value=False, key=f"ma60_{chart_prefix}_{stock_code}")
+            show_boll  = ind_cols[4].checkbox("Bollinger", value=False, key=f"boll_{chart_prefix}_{stock_code}")
+            show_volume= ind_cols[5].checkbox("Volume",    value=True,  key=f"volume_{chart_prefix}_{stock_code}")
+            show_rsi   = ind_cols[6].checkbox("RSI14",     value=False, key=f"rsi_{chart_prefix}_{stock_code}")
+            show_macd  = ind_cols[7].checkbox("MACD",      value=False, key=f"macd_{chart_prefix}_{stock_code}")
         else:
             chart_mode = str(chart_options.get("chart_mode", "daily"))
             minute_interval = int(chart_options.get("minute_interval", 5))
             full_history = bool(chart_options.get("full_history", True))
             show_ma5 = bool(chart_options.get("show_ma5", True))
+            show_ma10 = bool(chart_options.get("show_ma10", False))
             show_ma20 = bool(chart_options.get("show_ma20", True))
             show_ma60 = bool(chart_options.get("show_ma60", False))
             show_boll = bool(chart_options.get("show_boll", False))
             show_volume = bool(chart_options.get("show_volume", True))
             show_rsi = bool(chart_options.get("show_rsi", False))
             show_macd = bool(chart_options.get("show_macd", False))
-            st.caption("Shared chart controls are applied to both panels.")
+            # Set session_state first (no value/index in widget to avoid Streamlit warning)
+            _mode_opts = ["minute", "daily", "weekly", "monthly"]
+            _min_opts  = [1, 2, 3, 5, 10, 15, 30, 60]
+            st.session_state[f"chart_mode_{chart_prefix}_{stock_code}"]      = chart_mode
+            st.session_state[f"minute_interval_{chart_prefix}_{stock_code}"] = minute_interval
+            st.session_state[f"full_history_{chart_prefix}_{stock_code}"]    = full_history
+            st.session_state[f"ma5_{chart_prefix}_{stock_code}"]    = show_ma5
+            st.session_state[f"ma10_{chart_prefix}_{stock_code}"]   = show_ma10
+            st.session_state[f"ma20_{chart_prefix}_{stock_code}"]   = show_ma20
+            st.session_state[f"ma60_{chart_prefix}_{stock_code}"]   = show_ma60
+            st.session_state[f"boll_{chart_prefix}_{stock_code}"]   = show_boll
+            st.session_state[f"volume_{chart_prefix}_{stock_code}"] = show_volume
+            st.session_state[f"rsi_{chart_prefix}_{stock_code}"]    = show_rsi
+            st.session_state[f"macd_{chart_prefix}_{stock_code}"]   = show_macd
+            # Render same layout as left chart but disabled (keeps vertical alignment)
+            _sync_pref = st.columns([1.2, 1.2, 1.4, 2.0])
+            _sync_pref[0].selectbox(
+                "Timeframe",
+                options=_mode_opts,
+                format_func=lambda v: {"minute": "Minute", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}[v],
+                key=f"chart_mode_{chart_prefix}_{stock_code}",
+                disabled=True,
+            )
+            _sync_pref[1].selectbox(
+                "Minute",
+                options=_min_opts,
+                disabled=True,
+                key=f"minute_interval_{chart_prefix}_{stock_code}",
+            )
+            _sync_pref[2].checkbox(
+                "Full History",
+                disabled=True,
+                key=f"full_history_{chart_prefix}_{stock_code}",
+            )
+            _sync_pref[3].caption("🔒 왼쪽 차트와 연동")
+            _ind = st.columns(8)
+            _ind[0].checkbox("MA5",       disabled=True, key=f"ma5_{chart_prefix}_{stock_code}")
+            _ind[1].checkbox("MA10",      disabled=True, key=f"ma10_{chart_prefix}_{stock_code}")
+            _ind[2].checkbox("MA20",      disabled=True, key=f"ma20_{chart_prefix}_{stock_code}")
+            _ind[3].checkbox("MA60",      disabled=True, key=f"ma60_{chart_prefix}_{stock_code}")
+            _ind[4].checkbox("Bollinger", disabled=True, key=f"boll_{chart_prefix}_{stock_code}")
+            _ind[5].checkbox("Volume",    disabled=True, key=f"volume_{chart_prefix}_{stock_code}")
+            _ind[6].checkbox("RSI14",     disabled=True, key=f"rsi_{chart_prefix}_{stock_code}")
+            _ind[7].checkbox("MACD",      disabled=True, key=f"macd_{chart_prefix}_{stock_code}")
 
         if item.get("asset_type") == "index":
             history = _get_benchmark_chart_history(str(item.get("market", "")), lookback_days, chart_mode, full_history=bool(full_history))
@@ -719,6 +795,8 @@ def _render_chart_panel(
         overlays: List[str] = []
         if show_ma5:
             overlays.append("MA5")
+        if show_ma10:
+            overlays.append("MA10")
         if show_ma20:
             overlays.append("MA20")
         if show_ma60:
@@ -826,8 +904,7 @@ def _render_snapshot_card(
 
 
 def _render_compare_controls(control_key: str) -> Dict[str, object]:
-    st.markdown("### Shared Chart Controls")
-    row1 = st.columns([1.1, 1.0, 1.1, 1.1])
+    row1 = st.columns([1.1, 1.0, 1.1, 2.1])
     chart_mode = row1[0].selectbox(
         "Timeframe",
         options=["minute", "daily", "weekly", "monthly"],
@@ -850,20 +927,22 @@ def _render_compare_controls(control_key: str) -> Dict[str, object]:
     )
     row1[3].caption("Both charts use the same timeframe and stay synchronized while panning or zooming.")
 
-    row2 = st.columns(7)
-    show_ma5 = row2[0].checkbox("MA5", value=True, key=f"shared_ma5_{control_key}")
-    show_ma20 = row2[1].checkbox("MA20", value=True, key=f"shared_ma20_{control_key}")
-    show_ma60 = row2[2].checkbox("MA60", value=False, key=f"shared_ma60_{control_key}")
-    show_boll = row2[3].checkbox("Bollinger", value=False, key=f"shared_boll_{control_key}")
-    show_volume = row2[4].checkbox("Volume", value=True, key=f"shared_volume_{control_key}")
-    show_rsi = row2[5].checkbox("RSI14", value=False, key=f"shared_rsi_{control_key}")
-    show_macd = row2[6].checkbox("MACD", value=False, key=f"shared_macd_{control_key}")
+    row2 = st.columns(8)
+    show_ma5    = row2[0].checkbox("MA5",       value=True,  key=f"shared_ma5_{control_key}")
+    show_ma10   = row2[1].checkbox("MA10",      value=False, key=f"shared_ma10_{control_key}")
+    show_ma20   = row2[2].checkbox("MA20",      value=True,  key=f"shared_ma20_{control_key}")
+    show_ma60   = row2[3].checkbox("MA60",      value=False, key=f"shared_ma60_{control_key}")
+    show_boll   = row2[4].checkbox("Bollinger", value=False, key=f"shared_boll_{control_key}")
+    show_volume = row2[5].checkbox("Volume",    value=True,  key=f"shared_volume_{control_key}")
+    show_rsi    = row2[6].checkbox("RSI14",     value=False, key=f"shared_rsi_{control_key}")
+    show_macd   = row2[7].checkbox("MACD",      value=False, key=f"shared_macd_{control_key}")
 
     return {
         "chart_mode": chart_mode,
         "minute_interval": int(minute_interval),
         "full_history": bool(full_history),
         "show_ma5": bool(show_ma5),
+        "show_ma10": bool(show_ma10),
         "show_ma20": bool(show_ma20),
         "show_ma60": bool(show_ma60),
         "show_boll": bool(show_boll),
@@ -935,15 +1014,53 @@ def _render_search_tab(system: StockAutoSearch) -> None:
         st.caption(f"Multiple matches were found. Showing the first result: {primary.get('name')} ({primary.get('code')}).")
 
     benchmark = system.get_market_benchmark_snapshot(str(primary.get("market", "")), lookback_days=SEARCH_LOOKBACK_DAYS)
-    compare_controls = _render_compare_controls(str(primary.get("code", "stock")))
     sync_group = f"compare_{primary.get('code')}_{primary.get('market')}"
+    code = str(primary.get("code", "stock"))
+    left_prefix = f"stock_{code}"
 
+    # Header row: left title | lock toggle | right title
+    hdr_left, hdr_mid, hdr_right = st.columns([4, 1, 4])
+    with hdr_left:
+        st.markdown("### Selected Stock")
+    with hdr_mid:
+        st.markdown(
+            "<div style='text-align:center;font-size:0.72rem;color:#596761;margin-bottom:2px;'>Sync</div>",
+            unsafe_allow_html=True,
+        )
+        sync_locked = st.toggle(
+            "sync_lock",
+            value=True,
+            key="compare_sync_locked",
+            label_visibility="collapsed",
+            help="ON: 양쪽 차트 지표·기간 설정 연동  |  OFF: 각자 독립 설정",
+        )
+    with hdr_right:
+        st.markdown("### Market Benchmark")
+
+    # Left chart always shows its own individual controls
     left_col, right_col = st.columns(2, gap="large")
     with left_col:
-        st.markdown("### Selected Stock")
-        _render_snapshot_card(primary, chart_options=compare_controls, chart_prefix=f"stock_{primary.get('code')}", sync_group=sync_group)
+        _render_snapshot_card(primary, chart_options=None, chart_prefix=left_prefix, sync_group=sync_group)
+
+    # When sync is ON, read left chart's control values from session_state and pass to right chart
+    if sync_locked:
+        compare_controls: Optional[Dict[str, object]] = {
+            "chart_mode":       st.session_state.get(f"chart_mode_{left_prefix}_{code}", "daily"),
+            "minute_interval":  st.session_state.get(f"minute_interval_{left_prefix}_{code}", 5),
+            "full_history":     st.session_state.get(f"full_history_{left_prefix}_{code}", True),
+            "show_ma5":         st.session_state.get(f"ma5_{left_prefix}_{code}", True),
+            "show_ma10":        st.session_state.get(f"ma10_{left_prefix}_{code}", False),
+            "show_ma20":        st.session_state.get(f"ma20_{left_prefix}_{code}", True),
+            "show_ma60":        st.session_state.get(f"ma60_{left_prefix}_{code}", False),
+            "show_boll":        st.session_state.get(f"boll_{left_prefix}_{code}", False),
+            "show_volume":      st.session_state.get(f"volume_{left_prefix}_{code}", True),
+            "show_rsi":         st.session_state.get(f"rsi_{left_prefix}_{code}", False),
+            "show_macd":        st.session_state.get(f"macd_{left_prefix}_{code}", False),
+        }
+    else:
+        compare_controls = None
+
     with right_col:
-        st.markdown("### Market Benchmark")
         if benchmark:
             _render_snapshot_card(benchmark, chart_options=compare_controls, chart_prefix=f"benchmark_{benchmark.get('market')}", sync_group=sync_group)
         else:
