@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config.config import Config
 from main import StockAutoSearch
@@ -19,6 +20,10 @@ RISE_COLOR = "#d92d20"
 FALL_COLOR = "#175cd3"
 FLAT_COLOR = "#101828"
 LINE_COLOR = "#475467"
+SEARCH_RESULT_LIMIT = 3
+SEARCH_LOOKBACK_DAYS = 365
+FULL_CHART_START_DATE = "19800104"
+INITIAL_VISIBLE_CANDLES = 100
 
 
 def _inject_styles() -> None:
@@ -34,7 +39,7 @@ def _inject_styles() -> None:
             color: #13231c;
             font-family: 'Noto Sans KR', sans-serif;
         }
-        .block-container { padding-top: 1.5rem; padding-bottom: 2.4rem; max-width: 1180px; }
+        .block-container { padding-top: 1.5rem; padding-bottom: 2.4rem; max-width: 1680px; }
         h1, h2, h3 { font-family: 'Space Grotesk', 'Noto Sans KR', sans-serif; letter-spacing: -0.03em; }
         .hero {
             padding: 1.35rem 1.5rem 1.2rem;
@@ -63,6 +68,13 @@ def _inject_styles() -> None:
         .detail-cell { background: rgba(255,255,255,0.72); border:1px solid rgba(19, 35, 28, 0.08); border-radius:14px; padding:0.7rem 0.8rem; }
         .detail-label { color: #596761; font-size:0.74rem; margin-bottom:0.2rem; }
         .detail-value { font-size:1rem; font-weight:700; font-family: 'Space Grotesk', 'Noto Sans KR', sans-serif; }
+        .panel-wrap { background: rgba(255,255,255,0.78); border: 1px solid rgba(19, 35, 28, 0.08); border-radius: 18px; padding: 0.9rem 1rem; margin-bottom: 0.85rem; }
+        .panel-title { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; color: #596761; margin-bottom: 0.7rem; font-weight: 700; }
+        .panel-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.6rem; }
+        .panel-card { border: 1px solid rgba(19, 35, 28, 0.08); border-radius: 14px; padding: 0.7rem 0.8rem; background: rgba(255,255,255,0.72); }
+        .panel-label { color: #596761; font-size: 0.74rem; margin-bottom: 0.2rem; }
+        .panel-label.accent { color: #d65a31; font-weight: 700; letter-spacing: 0.04em; }
+        .panel-value { font-size: 1rem; font-weight: 700; font-family: 'Space Grotesk', 'Noto Sans KR', sans-serif; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -148,6 +160,55 @@ def _tone_color(value) -> str:
     return FLAT_COLOR
 
 
+def _panel_value(value, suffix: str = "") -> str:
+    return _fmt_number(value, suffix=suffix) if value is not None else "-"
+
+
+def _panel_decimal(value, suffix: str = "") -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):,.2f}{suffix}"
+    except Exception:
+        return str(value)
+
+
+def _panel_pct(value) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):,.2f}%"
+    except Exception:
+        return str(value)
+
+
+def _fmt_large_krw(value) -> str:
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+    except Exception:
+        return str(value)
+    if abs(number) >= 100_000_000:
+        return f"{number / 100_000_000:,.0f} EOK"
+    return f"{number:,.0f} KRW"
+
+
+def _item_price_suffix(item: Dict[str, object]) -> str:
+    return str(item.get("price_suffix", " KRW"))
+
+
+def _item_price_digits(item: Dict[str, object]) -> int:
+    try:
+        return int(item.get("price_digits", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _fmt_item_price(item: Dict[str, object], value) -> str:
+    return _fmt_number(value, digits=_item_price_digits(item), suffix=_item_price_suffix(item))
+
+
 def _read_recent_reports(limit: int = 12) -> Iterable[Path]:
     report_dir = Path(Config.DATA_DIR) / "reports"
     if not report_dir.exists():
@@ -161,12 +222,13 @@ def _load_report(path: Path) -> Dict[str, object]:
 
 
 @st.cache_data(show_spinner=False)
-def _get_chart_history(stock_code: str, lookback_days: int, chart_period: str, minute_interval: int) -> pd.DataFrame:
+def _get_chart_history(stock_code: str, lookback_days: int, chart_period: str, minute_interval: int, full_history: bool = False) -> pd.DataFrame:
     history = get_system().get_price_history(
         stock_code,
         lookback_days=lookback_days,
         period=chart_period,
         minute_interval=minute_interval,
+        full_history=full_history,
     )
     if history is None or history.empty:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
@@ -183,6 +245,49 @@ def _get_chart_history(stock_code: str, lookback_days: int, chart_period: str, m
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    return frame.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def _get_benchmark_chart_history(market: str, lookback_days: int, chart_period: str, full_history: bool = False) -> pd.DataFrame:
+    history = get_system().get_market_benchmark_history(
+        market,
+        lookback_days=lookback_days,
+        full_history=full_history,
+    )
+    if history is None or history.empty:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+
+    frame = history.reset_index().copy()
+    columns = list(frame.columns)
+    normalized_names = ["date", "open", "high", "low", "close", "volume"]
+    rename_map = {}
+    for index, normalized_name in enumerate(normalized_names):
+        if index < len(columns):
+            rename_map[columns[index]] = normalized_name
+    frame = frame.rename(columns=rename_map)
+    for column in ["open", "high", "low", "close", "volume"]:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+
+    if chart_period == "weekly":
+        frame = (
+            frame.set_index("date")
+            .resample("W")
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+            .dropna(subset=["open", "high", "low", "close"])
+            .reset_index()
+        )
+    elif chart_period == "monthly":
+        frame = (
+            frame.set_index("date")
+            .resample("ME")
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+            .dropna(subset=["open", "high", "low", "close"])
+            .reset_index()
+        )
+
     return frame.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
 
 
@@ -219,188 +324,293 @@ def _render_candlestick_chart(
     show_volume: bool,
     show_rsi: bool,
     show_macd: bool,
+    full_history: bool = False,
+    sync_group: Optional[str] = None,
+    chart_key_prefix: str = "chart",
+    chart_label: Optional[str] = None,
 ) -> None:
     if chart.empty:
         st.info("No chart data available for this timeframe.")
         return
 
     source = chart.copy().sort_values("date").reset_index(drop=True)
-    label_format = "%Y-%m-%d %H:%M" if chart_mode == "minute" else "%Y-%m-%d"
-    source["x_label"] = pd.to_datetime(source["date"]).dt.strftime(label_format)
+    source["date"] = pd.to_datetime(source["date"], errors="coerce")
+    source = source.dropna(subset=["date", "open", "high", "low", "close"])
+    if source.empty:
+        st.info("No chart data available for this timeframe.")
+        return
 
-    panel_specs = [("price", 0.62)]
-    if show_volume:
-        panel_specs.append(("volume", 0.16))
-    if show_rsi:
-        panel_specs.append(("rsi", 0.11))
-    if show_macd:
-        panel_specs.append(("macd", 0.11))
+    date_min = source["date"].min()
+    date_max = source["date"].max()
+    is_intraday = chart_mode == "minute"
+    source["time_key"] = source["date"].dt.strftime("%Y-%m-%d %H:%M" if is_intraday else "%Y-%m-%d")
+    if is_intraday:
+        source["chart_time"] = (source["date"].astype("int64") // 10**9).astype(int)
+    else:
+        source["chart_time"] = source["date"].apply(
+            lambda value: {
+                "year": int(value.year),
+                "month": int(value.month),
+                "day": int(value.day),
+            }
+        )
 
-    row_count = len(panel_specs)
-    row_heights = [height for _, height in panel_specs]
-    subplot_titles = [name.upper() for name, _ in panel_specs]
-    figure = make_subplots(
-        rows=row_count,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=row_heights,
-        subplot_titles=subplot_titles,
-    )
+    candles = [
+        {
+            "time": row.chart_time,
+            "timeKey": row.time_key,
+            "open": float(row.open),
+            "high": float(row.high),
+            "low": float(row.low),
+            "close": float(row.close),
+        }
+        for row in source.itertuples(index=False)
+    ]
 
-    row_map = {}
-    for index, (name, _) in enumerate(panel_specs, start=1):
-        row_map[name] = index
+    volume = []
+    if show_volume and "volume" in source.columns:
+        for row in source.itertuples(index=False):
+            open_price = float(row.open)
+            close_price = float(row.close)
+            volume.append(
+                {
+                    "time": row.chart_time,
+                    "timeKey": row.time_key,
+                    "value": float(row.volume or 0),
+                    "color": RISE_COLOR if close_price >= open_price else FALL_COLOR,
+                }
+            )
 
-    figure.add_trace(
-        go.Candlestick(
-            x=source["x_label"],
-            open=source["open"],
-            high=source["high"],
-            low=source["low"],
-            close=source["close"],
-            increasing_line_color=RISE_COLOR,
-            decreasing_line_color=FALL_COLOR,
-            increasing_fillcolor=RISE_COLOR,
-            decreasing_fillcolor=FALL_COLOR,
-            name="Price",
-            customdata=source[["date"]],
-            hovertemplate=(
-                "Time: %{customdata[0]|%Y-%m-%d %H:%M}<br>"
-                "Open: %{open:,}<br>"
-                "High: %{high:,}<br>"
-                "Low: %{low:,}<br>"
-                "Close: %{close:,}<extra></extra>"
-            ),
-        ),
-        row=row_map["price"],
-        col=1,
-    )
-
-    overlay_colors = {
-        "MA5": "#f97316",
-        "MA20": "#0f766e",
-        "MA60": "#7c3aed",
-        "BB_UPPER": "#94a3b8",
-        "BB_MID": "#64748b",
-        "BB_LOWER": "#94a3b8",
-    }
+    overlay_data: Dict[str, List[Dict[str, float]]] = {}
     for field in overlay_fields:
         if field not in source.columns:
             continue
-        data = source[["x_label", field]].dropna()
+        data = source[["chart_time", "time_key", field]].dropna()
         if data.empty:
             continue
-        figure.add_trace(
-            go.Scatter(
-                x=data["x_label"],
-                y=data[field],
-                mode="lines",
-                line={"color": overlay_colors.get(field, LINE_COLOR), "width": 2},
-                name=field,
-                hovertemplate=f"{field}: %{{y:,.2f}}<extra></extra>",
-            ),
-            row=row_map["price"],
-            col=1,
-        )
+        overlay_data[field] = [
+            {"time": row["chart_time"], "timeKey": row["time_key"], "value": float(row[field])}
+            for _, row in data.iterrows()
+        ]
 
-    if show_volume:
-        colors = [RISE_COLOR if close >= open_ else FALL_COLOR for open_, close in zip(source["open"], source["close"])]
-        figure.add_trace(
-            go.Bar(
-                x=source["x_label"],
-                y=source["volume"],
-                marker_color=colors,
-                name="Volume",
-                hovertemplate="Volume: %{y:,}<extra></extra>",
-            ),
-            row=row_map["volume"],
-            col=1,
-        )
+    rsi_data: List[Dict[str, float]] = []
+    if show_rsi and "RSI14" in source.columns:
+        data = source[["chart_time", "time_key", "RSI14"]].dropna()
+        rsi_data = [{"time": row.chart_time, "timeKey": row.time_key, "value": float(row.RSI14)} for row in data.itertuples(index=False)]
 
-    if show_rsi:
-        rsi_data = source[["x_label", "RSI14"]].dropna()
-        if not rsi_data.empty:
-            figure.add_trace(
-                go.Scatter(
-                    x=rsi_data["x_label"],
-                    y=rsi_data["RSI14"],
-                    mode="lines",
-                    line={"color": "#7c3aed", "width": 2},
-                    name="RSI14",
-                    hovertemplate="RSI14: %{y:,.2f}<extra></extra>",
-                ),
-                row=row_map["rsi"],
-                col=1,
-            )
-            figure.add_hline(y=70, line_dash="dot", line_color="#d0d5dd", row=row_map["rsi"], col=1)
-            figure.add_hline(y=30, line_dash="dot", line_color="#d0d5dd", row=row_map["rsi"], col=1)
+    macd_data: List[Dict[str, float]] = []
+    macd_signal_data: List[Dict[str, float]] = []
+    if show_macd and "MACD" in source.columns:
+        data = source[["chart_time", "time_key", "MACD"]].dropna()
+        macd_data = [{"time": row.chart_time, "timeKey": row.time_key, "value": float(row.MACD)} for row in data.itertuples(index=False)]
+        if "MACD_SIGNAL" in source.columns:
+            signal = source[["chart_time", "time_key", "MACD_SIGNAL"]].dropna()
+            macd_signal_data = [
+                {"time": row.chart_time, "timeKey": row.time_key, "value": float(row.MACD_SIGNAL)}
+                for row in signal.itertuples(index=False)
+            ]
 
-    if show_macd:
-        macd_data = source[["x_label", "MACD", "MACD_SIGNAL"]].dropna(how="all")
-        if not macd_data.empty:
-            figure.add_trace(
-                go.Scatter(
-                    x=macd_data["x_label"],
-                    y=macd_data["MACD"],
-                    mode="lines",
-                    line={"color": "#0f766e", "width": 2},
-                    name="MACD",
-                    hovertemplate="MACD: %{y:,.2f}<extra></extra>",
-                ),
-                row=row_map["macd"],
-                col=1,
-            )
-            signal_data = macd_data.dropna(subset=["MACD_SIGNAL"])
-            if not signal_data.empty:
-                figure.add_trace(
-                    go.Scatter(
-                        x=signal_data["x_label"],
-                        y=signal_data["MACD_SIGNAL"],
-                        mode="lines",
-                        line={"color": "#f97316", "width": 2},
-                        name="MACD Signal",
-                        hovertemplate="Signal: %{y:,.2f}<extra></extra>",
-                    ),
-                    row=row_map["macd"],
-                    col=1,
-                )
-            figure.add_hline(y=0, line_dash="dot", line_color="#d0d5dd", row=row_map["macd"], col=1)
+    payload = {
+        "candles": candles,
+        "volume": volume,
+        "overlays": overlay_data,
+        "rsi": rsi_data,
+        "macd": macd_data,
+        "macdSignal": macd_signal_data,
+        "isIntraday": is_intraday,
+        "showVolume": bool(show_volume),
+        "showRsi": bool(show_rsi),
+        "showMacd": bool(show_macd),
+        "initialVisible": int(min(len(source), INITIAL_VISIBLE_CANDLES)),
+        "title": f"{chart_label or stock_code} {chart_mode.title()}" + (" - Full History" if full_history and chart_mode != "minute" else ""),
+        "syncGroup": sync_group or "",
+        "chartId": f"{chart_key_prefix}_{stock_code}_{chart_mode}",
+    }
 
-    label_map = {"minute": "Minute", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
-    figure.update_layout(
-        title=f"{stock_code} {label_map.get(chart_mode, chart_mode)}",
-        height=520 + max(0, row_count - 1) * 120,
-        margin={"l": 12, "r": 12, "t": 48, "b": 12},
-        plot_bgcolor="#ffffff",
-        paper_bgcolor="rgba(0,0,0,0)",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0},
-        dragmode="pan",
-        hovermode="x unified",
-        bargap=0.15,
+    pane_count = 1 + int(show_volume) + int(show_rsi) + int(show_macd)
+    component_height = 420 + max(0, pane_count - 1) * 140
+    html = f"""
+    <div id="chart-root" style="width:100%;">
+      <div style="font:600 14px Space Grotesk, sans-serif;color:#13231c;margin:0 0 8px 2px;">{{payload_title}}</div>
+      <div id="price-wrap" style="position:relative;width:100%;height:360px;margin-bottom:10px;"> 
+        <div id="price-pane" style="width:100%;height:360px;"></div>
+        <div id="price-tooltip" style="position:absolute;left:12px;top:12px;z-index:20;min-width:220px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.94);border:1px solid #e4e7ec;box-shadow:0 8px 24px rgba(16,24,40,0.08);font:12px/1.45 Noto Sans KR,sans-serif;color:#101828;pointer-events:none;display:none;"></div>
+      </div>
+      <div id="volume-wrap" style="position:relative;width:100%;height:120px;margin-bottom:10px;display:none;"> 
+        <div id="volume-pane" style="width:100%;height:120px;"></div>
+        <div id="volume-tooltip" style="position:absolute;left:12px;top:10px;z-index:20;min-width:180px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.94);border:1px solid #e4e7ec;box-shadow:0 8px 24px rgba(16,24,40,0.08);font:12px/1.45 Noto Sans KR,sans-serif;color:#101828;pointer-events:none;display:none;"></div>
+      </div>
+      <div id="rsi-wrap" style="position:relative;width:100%;height:120px;margin-bottom:10px;display:none;"> 
+        <div id="rsi-pane" style="width:100%;height:120px;"></div>
+        <div id="rsi-tooltip" style="position:absolute;left:12px;top:10px;z-index:20;min-width:180px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.94);border:1px solid #e4e7ec;box-shadow:0 8px 24px rgba(16,24,40,0.08);font:12px/1.45 Noto Sans KR,sans-serif;color:#101828;pointer-events:none;display:none;"></div>
+      </div>
+      <div id="macd-wrap" style="position:relative;width:100%;height:120px;display:none;"> 
+        <div id="macd-pane" style="width:100%;height:120px;"></div>
+        <div id="macd-tooltip" style="position:absolute;left:12px;top:10px;z-index:20;min-width:180px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.94);border:1px solid #e4e7ec;box-shadow:0 8px 24px rgba(16,24,40,0.08);font:12px/1.45 Noto Sans KR,sans-serif;color:#101828;pointer-events:none;display:none;"></div>
+      </div>
+    </div>
+    <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+    <script>
+    const payload = __PAYLOAD__;
+    const root = document.getElementById('chart-root');
+    root.querySelector('div').textContent = payload.title;
+    const priceTooltip = document.getElementById('price-tooltip');
+    const volumeTooltip = document.getElementById('volume-tooltip');
+    const rsiTooltip = document.getElementById('rsi-tooltip');
+    const macdTooltip = document.getElementById('macd-tooltip');
+    const syncChannel = (payload.syncGroup && typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('stock_auto_search_' + payload.syncGroup) : null;
+    let syncing = false;
+    let lastRangeKey = '';
+
+    function paneStyle(height) {{
+      return {{
+        width: root.clientWidth || 820,
+        height,
+        layout: {{ background: {{ color: '#ffffff' }}, textColor: '#667085' }},
+        grid: {{ vertLines: {{ color: '#f2f4f7' }}, horzLines: {{ color: '#f2f4f7' }} }},
+        rightPriceScale: {{ borderColor: '#e4e7ec', autoScale: true }},
+        timeScale: {{
+          borderColor: '#e4e7ec',
+          timeVisible: payload.isIntraday,
+          secondsVisible: false,
+          rightOffset: 0,
+          barSpacing: 8,
+          fixLeftEdge: false,
+          fixRightEdge: true,
+          rightBarStaysOnScroll: true,
+          lockVisibleTimeRangeOnResize: true,
+        }},
+        crosshair: {{ mode: 0 }},
+        handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
+        handleScale: {{ mouseWheel: true, pinch: true, axisPressedMouseMove: {{ time: true, price: false }} }},
+      }};
+    }}
+
+    const priceChart = LightweightCharts.createChart(document.getElementById('price-pane'), paneStyle(360));
+    const charts = [priceChart];
+    const candleSeries = priceChart.addCandlestickSeries({{
+      upColor: '{RISE_COLOR}', downColor: '{FALL_COLOR}', borderVisible: false,
+      wickUpColor: '{RISE_COLOR}', wickDownColor: '{FALL_COLOR}', priceLineVisible: false,
+    }});
+    candleSeries.setData(payload.candles);
+
+    const overlaySeriesMap = {{}};
+    const overlayColors = {{ MA5:'#f97316', MA20:'#0f766e', MA60:'#7c3aed', BB_UPPER:'#94a3b8', BB_MID:'#64748b', BB_LOWER:'#94a3b8' }};
+    Object.entries(payload.overlays || {{}}).forEach(([name, data]) => {{
+      const series = priceChart.addLineSeries({{ color: overlayColors[name] || '{LINE_COLOR}', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
+      series.setData(data);
+      overlaySeriesMap[name] = series;
+    }});
+
+    let volumeChart = null; let volumeSeries = null;
+    if (payload.showVolume) {{
+      document.getElementById('volume-wrap').style.display = 'block';
+      volumeChart = LightweightCharts.createChart(document.getElementById('volume-pane'), paneStyle(120));
+      charts.push(volumeChart);
+      volumeSeries = volumeChart.addHistogramSeries({{ priceFormat: {{ type: 'volume' }}, priceLineVisible: false, lastValueVisible: false }});
+      volumeSeries.setData(payload.volume);
+    }}
+
+    let rsiChart = null; let rsiSeries = null;
+    if (payload.showRsi) {{
+      document.getElementById('rsi-wrap').style.display = 'block';
+      rsiChart = LightweightCharts.createChart(document.getElementById('rsi-pane'), paneStyle(120));
+      charts.push(rsiChart);
+      rsiSeries = rsiChart.addLineSeries({{ color: '#7c3aed', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
+      rsiSeries.setData(payload.rsi);
+      rsiSeries.createPriceLine({{ price: 70, color: '#d0d5dd', lineStyle: 2, lineWidth: 1, axisLabelVisible: false, title: '' }});
+      rsiSeries.createPriceLine({{ price: 30, color: '#d0d5dd', lineStyle: 2, lineWidth: 1, axisLabelVisible: false, title: '' }});
+    }}
+
+    let macdChart = null; let macdSeries = null; let signalSeries = null;
+    if (payload.showMacd) {{
+      document.getElementById('macd-wrap').style.display = 'block';
+      macdChart = LightweightCharts.createChart(document.getElementById('macd-pane'), paneStyle(120));
+      charts.push(macdChart);
+      macdSeries = macdChart.addLineSeries({{ color: '#0f766e', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
+      macdSeries.setData(payload.macd);
+      signalSeries = macdChart.addLineSeries({{ color: '#f97316', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
+      signalSeries.setData(payload.macdSignal);
+      macdSeries.createPriceLine({{ price: 0, color: '#d0d5dd', lineStyle: 2, lineWidth: 1, axisLabelVisible: false, title: '' }});
+    }}
+
+    function buildTimeKey(value, explicitKey) {{
+      if (explicitKey) return String(explicitKey);
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'number') return String(value);
+      if (typeof value === 'string') return value;
+      if (typeof value === 'object' && value.year && value.month && value.day) {{
+        return [value.year, String(value.month).padStart(2, '0'), String(value.day).padStart(2, '0')].join('-');
+      }}
+      return JSON.stringify(value);
+    }}
+    function buildTimeMap(rows) {{ const map = new Map(); (rows || []).forEach((row) => map.set(buildTimeKey(row.time, row.timeKey), row)); return map; }}
+    const candleMap = buildTimeMap(payload.candles);
+    const volumeMap = buildTimeMap(payload.volume);
+    const overlayMaps = {{}}; Object.entries(payload.overlays || {{}}).forEach(([name, rows]) => {{ overlayMaps[name] = buildTimeMap(rows); }});
+    const rsiMap = buildTimeMap(payload.rsi); const macdMap = buildTimeMap(payload.macd); const signalMap = buildTimeMap(payload.macdSignal);
+    function hideTooltip(node) {{ if (node) node.style.display = 'none'; }}
+    function hideAllTooltips() {{ hideTooltip(priceTooltip); hideTooltip(volumeTooltip); hideTooltip(rsiTooltip); hideTooltip(macdTooltip); }}
+    function showTooltip(node, lines) {{ if (!node) return; node.innerHTML = lines.map((line) => '<div>' + line + '</div>').join(''); node.style.display = 'block'; }}
+    function formatNumber(value, digits = 2) {{ if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'; return Number(value).toLocaleString('en-US', {{ minimumFractionDigits: digits, maximumFractionDigits: digits }}); }}
+    function formatInteger(value) {{ if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'; return Number(value).toLocaleString('en-US', {{ maximumFractionDigits: 0 }}); }}
+    function formatDateLabel(time) {{
+      if (payload.isIntraday) {{
+        const date = new Date(Number(time) * 1000);
+        if (Number.isNaN(date.getTime())) return '';
+        const yyyy = date.getFullYear(); const mm = String(date.getMonth()+1).padStart(2,'0'); const dd = String(date.getDate()).padStart(2,'0'); const hh = String(date.getHours()).padStart(2,'0'); const mi = String(date.getMinutes()).padStart(2,'0');
+        return yyyy + '-' + mm + '-' + dd + ' ' + hh + ':' + mi;
+      }}
+      return buildTimeKey(time) || '';
+    }}
+    function renderAllTooltips(param) {{
+      if (!param || !param.time || !param.point || param.point.x < 0 || param.point.y < 0) {{ hideAllTooltips(); return; }}
+      const timeKey = buildTimeKey(param.time); const candle = candleMap.get(timeKey); if (!candle) {{ hideAllTooltips(); return; }}
+      const priceLines = ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>', 'Open ' + formatInteger(candle.open) + ' | High ' + formatInteger(candle.high), 'Low ' + formatInteger(candle.low) + ' | Close ' + formatInteger(candle.close)];
+      Object.entries(overlayMaps).forEach(([name, map]) => {{ const point = map.get(timeKey); if (point && point.value !== undefined) priceLines.push(name + ' ' + formatNumber(point.value)); }});
+      showTooltip(priceTooltip, priceLines);
+      const volumePoint = volumeMap.get(timeKey); if (volumePoint && volumePoint.value !== undefined) showTooltip(volumeTooltip, ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>', 'Volume ' + formatInteger(volumePoint.value)]); else hideTooltip(volumeTooltip);
+      const rsiPoint = rsiMap.get(timeKey); if (rsiPoint && rsiPoint.value !== undefined) showTooltip(rsiTooltip, ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>', 'RSI14 ' + formatNumber(rsiPoint.value)]); else hideTooltip(rsiTooltip);
+      const macdPoint = macdMap.get(timeKey); const signalPoint = signalMap.get(timeKey); if ((macdPoint && macdPoint.value !== undefined) || (signalPoint && signalPoint.value !== undefined)) {{ const macdLines = ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>']; if (macdPoint && macdPoint.value !== undefined) macdLines.push('MACD ' + formatNumber(macdPoint.value)); if (signalPoint && signalPoint.value !== undefined) macdLines.push('Signal ' + formatNumber(signalPoint.value)); showTooltip(macdTooltip, macdLines); }} else hideTooltip(macdTooltip);
+    }}
+    charts.forEach((chart) => chart.subscribeCrosshairMove(renderAllTooltips));
+
+    function serializeTime(value) {{
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'number') return String(value);
+      if (typeof value === 'string') return value;
+      if (typeof value === 'object' && value.year && value.month && value.day) {{
+        return [value.year, String(value.month).padStart(2, '0'), String(value.day).padStart(2, '0')].join('-');
+      }}
+      return JSON.stringify(value);
+    }}
+    function rangeKey(range) {{ if (!range || !range.from || !range.to) return ''; return serializeTime(range.from) + ':' + serializeTime(range.to); }}
+    function applyRange(range) {{ if (!range || !range.from || !range.to) return; syncing = true; lastRangeKey = rangeKey(range); charts.forEach((chart) => chart.timeScale().setVisibleRange(range)); syncing = false; }}
+    priceChart.timeScale().subscribeVisibleTimeRangeChange((range) => {{
+      if (syncing || !range || !range.from || !range.to) return;
+      const key = rangeKey(range);
+      if (!key || key === lastRangeKey) return;
+      applyRange(range);
+      if (syncChannel) syncChannel.postMessage({{ type: 'range', source: payload.chartId, range, key }});
+    }});
+    if (syncChannel) {{
+      syncChannel.onmessage = (event) => {{
+        const message = event.data || {{}};
+        if (message.source === payload.chartId || message.type !== 'range' || !message.range) return;
+        if (message.key && message.key === lastRangeKey) return;
+        applyRange(message.range);
+      }};
+    }}
+    const total = payload.candles.length; const visible = Math.max(1, payload.initialVisible || 100); const fromIndex = Math.max(0, total - visible); const toIndex = Math.max(total - 1, 0); applyRange({{ from: payload.candles[fromIndex].time, to: payload.candles[toIndex].time }});
+    const resize = () => {{ const width = root.clientWidth || 820; charts.forEach((chart) => chart.applyOptions({{ width }})); }};
+    new ResizeObserver(resize).observe(root); resize();
+    </script>
+    """
+    html = html.replace('__PAYLOAD__', json.dumps(payload, ensure_ascii=False)).replace('{payload_title}', payload['title'])
+    st.caption(
+        f"Range: {date_min:%Y-%m-%d} to {date_max:%Y-%m-%d} | Initial view shows the most recent {min(len(source), INITIAL_VISIBLE_CANDLES)} candles. Horizontal zoom/pan is synchronized across panes" + (" and the paired benchmark chart." if sync_group else ".")
     )
-
-    for row_index in range(1, row_count + 1):
-        figure.update_xaxes(
-            showgrid=True,
-            gridcolor="#f2f4f7",
-            type="category",
-            categoryorder="array",
-            categoryarray=source["x_label"].tolist(),
-            row=row_index,
-            col=1,
-        )
-        figure.update_yaxes(showgrid=True, gridcolor="#f2f4f7", side="right", row=row_index, col=1)
-
-    figure.update_xaxes(rangeslider_visible=False, row=row_map["price"], col=1)
-    st.caption("Mouse wheel zoom and drag pan are synchronized across the main chart and indicator panels. Non-trading days are skipped.")
-    st.plotly_chart(
-        figure,
-        width="stretch",
-        config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
-        key=f"candle_{stock_code}_{chart_mode}",
-    )
-
+    components.html(html, height=component_height, scrolling=False)
 
 def _normalize_recent_ohlcv(rows: List[Dict[str, object]]) -> pd.DataFrame:
     if not rows:
@@ -442,30 +652,62 @@ def _render_report_actions(system: StockAutoSearch, report: Dict[str, object], t
         st.text_area("Alert Preview", value=preview, height=160, key=f"preview_{title}")
 
 
-def _render_chart_panel(item: Dict[str, object]) -> None:
+def _render_chart_panel(
+    item: Dict[str, object],
+    chart_options: Optional[Dict[str, object]] = None,
+    chart_prefix: str = "chart",
+    sync_group: Optional[str] = None,
+) -> None:
     stock_code = str(item.get("code", ""))
-    lookback_days = int(st.session_state.get("search_lookback", Config.DEFAULT_LOOKBACK_DAYS))
+    chart_label = str(item.get("name") or stock_code)
+    lookback_days = SEARCH_LOOKBACK_DAYS
     with st.expander("Chart / Indicators", expanded=True):
-        row = st.columns([1.2, 1.2, 2.2])
-        chart_mode = row[0].selectbox(
-            "Timeframe",
-            options=["minute", "daily", "weekly", "monthly"],
-            format_func=lambda value: {"minute": "Minute", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}[value],
-            key=f"chart_mode_{stock_code}",
-        )
-        minute_interval = row[1].selectbox(
-            "Minute",
-            options=[1, 2, 3, 5, 10, 15, 30, 60],
-            index=3,
-            disabled=chart_mode != "minute",
-            key=f"minute_interval_{stock_code}",
-        )
-        if chart_mode == "minute":
-            row[2].caption("Minute chart requires working KIS market-data authentication.")
+        if chart_options is None:
+            chart_pref_row = st.columns([1.2, 1.2, 1.4, 2.0])
+            chart_mode = chart_pref_row[0].selectbox(
+                "Timeframe",
+                options=["minute", "daily", "weekly", "monthly"],
+                index=1,
+                format_func=lambda value: {"minute": "Minute", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}[value],
+                key=f"chart_mode_{chart_prefix}_{stock_code}",
+            )
+            minute_interval = chart_pref_row[1].selectbox(
+                "Minute",
+                options=[1, 2, 3, 5, 10, 15, 30, 60],
+                index=3,
+                disabled=chart_mode != "minute",
+                key=f"minute_interval_{chart_prefix}_{stock_code}",
+            )
+            full_history = chart_pref_row[2].checkbox(
+                "Full History",
+                value=True,
+                disabled=chart_mode == "minute",
+                key=f"full_history_{chart_prefix}_{stock_code}",
+            )
+            show_ma5 = st.checkbox("MA5", value=True, key=f"ma5_{chart_prefix}_{stock_code}")
+            show_ma20 = st.checkbox("MA20", value=True, key=f"ma20_{chart_prefix}_{stock_code}")
+            show_ma60 = st.checkbox("MA60", value=False, key=f"ma60_{chart_prefix}_{stock_code}")
+            show_boll = st.checkbox("Bollinger", value=False, key=f"boll_{chart_prefix}_{stock_code}")
+            show_volume = st.checkbox("Volume", value=True, key=f"volume_{chart_prefix}_{stock_code}")
+            show_rsi = st.checkbox("RSI14", value=False, key=f"rsi_{chart_prefix}_{stock_code}")
+            show_macd = st.checkbox("MACD", value=False, key=f"macd_{chart_prefix}_{stock_code}")
         else:
-            row[2].caption("Daily, weekly, and monthly charts use pykrx daily data.")
+            chart_mode = str(chart_options.get("chart_mode", "daily"))
+            minute_interval = int(chart_options.get("minute_interval", 5))
+            full_history = bool(chart_options.get("full_history", True))
+            show_ma5 = bool(chart_options.get("show_ma5", True))
+            show_ma20 = bool(chart_options.get("show_ma20", True))
+            show_ma60 = bool(chart_options.get("show_ma60", False))
+            show_boll = bool(chart_options.get("show_boll", False))
+            show_volume = bool(chart_options.get("show_volume", True))
+            show_rsi = bool(chart_options.get("show_rsi", False))
+            show_macd = bool(chart_options.get("show_macd", False))
+            st.caption("Shared chart controls are applied to both panels.")
 
-        history = _get_chart_history(stock_code, lookback_days, chart_mode, int(minute_interval))
+        if item.get("asset_type") == "index":
+            history = _get_benchmark_chart_history(str(item.get("market", "")), lookback_days, chart_mode, full_history=bool(full_history))
+        else:
+            history = _get_chart_history(stock_code, lookback_days, chart_mode, int(minute_interval), full_history=bool(full_history))
         if history.empty:
             if chart_mode == "minute":
                 st.warning("Minute data is unavailable. Current KIS authentication is failing with 403.")
@@ -474,16 +716,6 @@ def _render_chart_panel(item: Dict[str, object]) -> None:
             return
 
         chart = _build_indicator_frame(history)
-        checkbox_row1 = st.columns(4)
-        show_ma5 = checkbox_row1[0].checkbox("MA5", value=True, key=f"ma5_{stock_code}")
-        show_ma20 = checkbox_row1[1].checkbox("MA20", value=True, key=f"ma20_{stock_code}")
-        show_ma60 = checkbox_row1[2].checkbox("MA60", value=False, key=f"ma60_{stock_code}")
-        show_boll = checkbox_row1[3].checkbox("Bollinger", value=False, key=f"boll_{stock_code}")
-        checkbox_row2 = st.columns(3)
-        show_volume = checkbox_row2[0].checkbox("Volume", value=True, key=f"volume_{stock_code}")
-        show_rsi = checkbox_row2[1].checkbox("RSI14", value=False, key=f"rsi_{stock_code}")
-        show_macd = checkbox_row2[2].checkbox("MACD", value=False, key=f"macd_{stock_code}")
-
         overlays: List[str] = []
         if show_ma5:
             overlays.append("MA5")
@@ -502,10 +734,19 @@ def _render_chart_panel(item: Dict[str, object]) -> None:
             show_volume=show_volume,
             show_rsi=show_rsi,
             show_macd=show_macd,
+            full_history=bool(full_history),
+            sync_group=sync_group,
+            chart_key_prefix=chart_prefix,
+            chart_label=chart_label,
         )
 
 
-def _render_snapshot_card(item: Dict[str, object]) -> None:
+def _render_snapshot_card(
+    item: Dict[str, object],
+    chart_options: Optional[Dict[str, object]] = None,
+    chart_prefix: str = "card",
+    sync_group: Optional[str] = None,
+) -> None:
     change_value = float(item.get("change", 0) or 0)
     tone_class = _tone_class(change_value)
     market_cap_eok = None
@@ -514,6 +755,7 @@ def _render_snapshot_card(item: Dict[str, object]) -> None:
             market_cap_eok = float(item.get("market_cap")) / 100_000_000
         except Exception:
             market_cap_eok = None
+    price_suffix = _item_price_suffix(item)
 
     st.markdown(
         f"""
@@ -522,38 +764,113 @@ def _render_snapshot_card(item: Dict[str, object]) -> None:
                 <div class="stock-name">{item.get('name', '-')} ({item.get('code', '-')})</div>
                 <div class="chip">{item.get('market', 'UNKNOWN')}</div>
             </div>
-            <div style="font-size:1.35rem;font-weight:700;">{_fmt_number(item.get('current_price'), suffix=' KRW')}</div>
-            <div class="{tone_class}" style="margin-top:0.2rem;font-size:1.02rem;font-weight:700;">{_fmt_signed_number(item.get('change'), suffix=' KRW')} {_fmt_pct(item.get('change_rate'))}</div>
+            <div style="font-size:1.35rem;font-weight:700;">{_fmt_item_price(item, item.get('current_price'))}</div>
+            <div class="{tone_class}" style="margin-top:0.2rem;font-size:1.02rem;font-weight:700;">{_fmt_signed_number(item.get('change'), suffix=price_suffix)} {_fmt_pct(item.get('change_rate'))}</div>
             <div class="muted" style="margin-top:0.35rem;">Volume {_fmt_number(item.get('volume'))} / Market Cap {_fmt_number(market_cap_eok)} EOK / As of {item.get('as_of', '-')}</div>
             <div class="detail-grid">
-                <div class="detail-cell"><div class="detail-label">Prev Close</div><div class="detail-value">{_fmt_number(item.get('previous_close'), suffix=' KRW')}</div></div>
-                <div class="detail-cell"><div class="detail-label">Open</div><div class="detail-value" style="color:{_tone_color((item.get('open') or 0) - (item.get('previous_close') or 0))}">{_fmt_number(item.get('open'), suffix=' KRW')}</div></div>
-                <div class="detail-cell"><div class="detail-label">High</div><div class="detail-value rise">{_fmt_number(item.get('high'), suffix=' KRW')}</div></div>
-                <div class="detail-cell"><div class="detail-label">Low</div><div class="detail-value fall">{_fmt_number(item.get('low'), suffix=' KRW')}</div></div>
-                <div class="detail-cell"><div class="detail-label">Current</div><div class="detail-value {tone_class}">{_fmt_number(item.get('current_price'), suffix=' KRW')}</div></div>
+                <div class="detail-cell"><div class="detail-label">Prev Close</div><div class="detail-value">{_fmt_item_price(item, item.get('previous_close'))}</div></div>
+                <div class="detail-cell"><div class="detail-label">Open</div><div class="detail-value" style="color:{_tone_color((item.get('open') or 0) - (item.get('previous_close') or 0))}">{_fmt_item_price(item, item.get('open'))}</div></div>
+                <div class="detail-cell"><div class="detail-label">High</div><div class="detail-value rise">{_fmt_item_price(item, item.get('high'))}</div></div>
+                <div class="detail-cell"><div class="detail-label">Low</div><div class="detail-value fall">{_fmt_item_price(item, item.get('low'))}</div></div>
+                <div class="detail-cell"><div class="detail-label">Current</div><div class="detail-value {tone_class}">{_fmt_item_price(item, item.get('current_price'))}</div></div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    metrics = pd.DataFrame([
+    stats_suffix = price_suffix
+    market_stats_html = f"""
+    <div class="panel-wrap">
+        <div class="panel-title">Market Stats</div>
+        <div class="panel-grid">
+            <div class="panel-card"><div class="panel-label">52W High</div><div class="panel-value">{_fmt_number(item.get('high_52w'), digits=_item_price_digits(item), suffix=stats_suffix) if item.get('high_52w') is not None else '-'}</div></div>
+            <div class="panel-card"><div class="panel-label">52W Low</div><div class="panel-value">{_fmt_number(item.get('low_52w'), digits=_item_price_digits(item), suffix=stats_suffix) if item.get('low_52w') is not None else '-'}</div></div>
+            <div class="panel-card"><div class="panel-label">Trading Value</div><div class="panel-value">{_fmt_large_krw(item.get('trading_value'))}</div></div>
+            <div class="panel-card"><div class="panel-label">Execution Strength</div><div class="panel-value">{_panel_pct(item.get('execution_strength'))}</div></div>
+        </div>
+    </div>
+    """
+    st.markdown(market_stats_html, unsafe_allow_html=True)
+
+    fundamentals_html = f"""
+    <div class="panel-wrap">
+        <div class="panel-title">Fundamentals</div>
+        <div class="panel-grid">
+            <div class="panel-card"><div class="panel-label accent">PER</div><div class="panel-value">{_panel_decimal(item.get('per'))}</div></div>
+            <div class="panel-card"><div class="panel-label accent">PBR</div><div class="panel-value">{_panel_decimal(item.get('pbr'))}</div></div>
+            <div class="panel-card"><div class="panel-label accent">ROE</div><div class="panel-value">{_panel_pct(item.get('roe'))}</div></div>
+            <div class="panel-card"><div class="panel-label accent">Dividend Yield</div><div class="panel-value">{_panel_pct(item.get('dividend_yield'))}</div></div>
+            <div class="panel-card"><div class="panel-label accent">EPS</div><div class="panel-value">{_panel_decimal(item.get('eps'))}</div></div>
+            <div class="panel-card"><div class="panel-label accent">BPS</div><div class="panel-value">{_panel_decimal(item.get('bps'))}</div></div>
+            <div class="panel-card"><div class="panel-label accent">DPS</div><div class="panel-value">{_panel_decimal(item.get('dps'))}</div></div>
+            <div class="panel-card"><div class="panel-label accent">Market Cap</div><div class="panel-value">{_fmt_large_krw(item.get('market_cap'))}</div></div>
+        </div>
+    </div>
+    """
+    st.markdown(fundamentals_html, unsafe_allow_html=True)
+
+    moving_avg_metrics = pd.DataFrame([
         {
             "MA5": item.get("ma5"),
             "MA20": item.get("ma20"),
             "MA60": item.get("ma60"),
-            "PER": item.get("per"),
-            "PBR": item.get("pbr"),
-            "52W High": item.get("high_52w"),
-            "52W Low": item.get("low_52w"),
             "Avg Vol 20D": item.get("average_volume_20d"),
         }
     ])
-    st.dataframe(metrics, width="stretch", hide_index=True)
-    _render_chart_panel(item)
+    st.dataframe(moving_avg_metrics, width="stretch", hide_index=True)
+    _render_chart_panel(item, chart_options=chart_options, chart_prefix=chart_prefix, sync_group=sync_group)
     recent = _normalize_recent_ohlcv(item.get("recent_ohlcv") or [])
     if not recent.empty:
         st.dataframe(recent, width="stretch", hide_index=True)
+
+
+def _render_compare_controls(control_key: str) -> Dict[str, object]:
+    st.markdown("### Shared Chart Controls")
+    row1 = st.columns([1.1, 1.0, 1.1, 1.1])
+    chart_mode = row1[0].selectbox(
+        "Timeframe",
+        options=["minute", "daily", "weekly", "monthly"],
+        index=1,
+        format_func=lambda value: {"minute": "Minute", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}[value],
+        key=f"shared_chart_mode_{control_key}",
+    )
+    minute_interval = row1[1].selectbox(
+        "Minute",
+        options=[1, 2, 3, 5, 10, 15, 30, 60],
+        index=3,
+        disabled=chart_mode != "minute",
+        key=f"shared_minute_interval_{control_key}",
+    )
+    full_history = row1[2].checkbox(
+        "Full History",
+        value=True,
+        disabled=chart_mode == "minute",
+        key=f"shared_full_history_{control_key}",
+    )
+    row1[3].caption("Both charts use the same timeframe and stay synchronized while panning or zooming.")
+
+    row2 = st.columns(7)
+    show_ma5 = row2[0].checkbox("MA5", value=True, key=f"shared_ma5_{control_key}")
+    show_ma20 = row2[1].checkbox("MA20", value=True, key=f"shared_ma20_{control_key}")
+    show_ma60 = row2[2].checkbox("MA60", value=False, key=f"shared_ma60_{control_key}")
+    show_boll = row2[3].checkbox("Bollinger", value=False, key=f"shared_boll_{control_key}")
+    show_volume = row2[4].checkbox("Volume", value=True, key=f"shared_volume_{control_key}")
+    show_rsi = row2[5].checkbox("RSI14", value=False, key=f"shared_rsi_{control_key}")
+    show_macd = row2[6].checkbox("MACD", value=False, key=f"shared_macd_{control_key}")
+
+    return {
+        "chart_mode": chart_mode,
+        "minute_interval": int(minute_interval),
+        "full_history": bool(full_history),
+        "show_ma5": bool(show_ma5),
+        "show_ma20": bool(show_ma20),
+        "show_ma60": bool(show_ma60),
+        "show_boll": bool(show_boll),
+        "show_volume": bool(show_volume),
+        "show_rsi": bool(show_rsi),
+        "show_macd": bool(show_macd),
+    }
 
 
 def _render_search_tab(system: StockAutoSearch) -> None:
@@ -568,7 +885,7 @@ def _render_search_tab(system: StockAutoSearch) -> None:
         selected_markets.append("KOSDAQ")
 
     options = _get_autocomplete_options(tuple(selected_markets)) if selected_markets else []
-    left, middle, right = st.columns([2.2, 1, 1])
+    left, _ = st.columns([2.2, 1.8])
     selected_candidate = left.selectbox(
         "Autocomplete",
         options=options,
@@ -583,8 +900,6 @@ def _render_search_tab(system: StockAutoSearch) -> None:
         placeholder="Type stock name or 6-digit ticker",
         key="search_direct_keyword",
     )
-    limit = middle.number_input("Result Count", min_value=1, max_value=20, step=1, value=3, key="search_limit")
-    lookback = right.number_input("Lookback Days", min_value=30, max_value=730, step=10, value=int(Config.DEFAULT_LOOKBACK_DAYS), key="search_lookback")
     submitted = st.button("Run Search", width="stretch", key="search_submit_button")
 
     if submitted:
@@ -596,29 +911,45 @@ def _render_search_tab(system: StockAutoSearch) -> None:
             st.warning("Choose an autocomplete item or enter a ticker/name manually.")
             return
         with st.spinner("Building report..."):
-            report = system.build_search_report(final_keyword, limit=int(limit), lookback_days=int(lookback), markets=selected_markets)
+            report = system.build_search_report(
+                final_keyword,
+                limit=SEARCH_RESULT_LIMIT,
+                lookback_days=SEARCH_LOOKBACK_DAYS,
+                markets=selected_markets,
+            )
         st.session_state["search_report"] = report
         st.session_state["last_report"] = report
 
     report = st.session_state.get("search_report")
     if not report:
-        st.caption("Run a search to populate the report and chart panel.")
+        st.caption("Run a search to populate the comparison workspace.")
         return
 
-    st.write({
-        "keyword": report.get("keyword"),
-        "generated_at": report.get("generated_at"),
-        "matches": report.get("match_count"),
-        "snapshots": report.get("snapshot_count"),
-    })
     stocks = report.get("stocks", []) or []
     if not stocks:
         st.warning("No stock snapshots were returned.")
-    else:
-        for item in stocks:
-            _render_snapshot_card(item)
-    _render_report_actions(system, report, f"search:{report.get('keyword', '')}")
+        return
 
+    primary = stocks[0]
+    if len(stocks) > 1:
+        st.caption(f"Multiple matches were found. Showing the first result: {primary.get('name')} ({primary.get('code')}).")
+
+    benchmark = system.get_market_benchmark_snapshot(str(primary.get("market", "")), lookback_days=SEARCH_LOOKBACK_DAYS)
+    compare_controls = _render_compare_controls(str(primary.get("code", "stock")))
+    sync_group = f"compare_{primary.get('code')}_{primary.get('market')}"
+
+    left_col, right_col = st.columns(2, gap="large")
+    with left_col:
+        st.markdown("### Selected Stock")
+        _render_snapshot_card(primary, chart_options=compare_controls, chart_prefix=f"stock_{primary.get('code')}", sync_group=sync_group)
+    with right_col:
+        st.markdown("### Market Benchmark")
+        if benchmark:
+            _render_snapshot_card(benchmark, chart_options=compare_controls, chart_prefix=f"benchmark_{benchmark.get('market')}", sync_group=sync_group)
+        else:
+            st.warning("Market benchmark data is not available for this market.")
+
+    _render_report_actions(system, report, f"search:{report.get('keyword', '')}")
 
 def _render_market_tab(system: StockAutoSearch) -> None:
     st.subheader("Market Radar")
@@ -684,36 +1015,12 @@ def _render_alert_center(system: StockAutoSearch) -> None:
 def main() -> None:
     st.set_page_config(page_title="Stock Auto Search", page_icon=":bar_chart:", layout="wide", initial_sidebar_state="expanded")
     _inject_styles()
-    st.markdown(
-        """
-        <div class="hero">
-            <div class="hero-kicker">Stock Intelligence Console</div>
-            <div class="hero-title">Search, scan, save, notify.</div>
-            <div class="hero-copy">Browser-first dashboard for stock search, report storage, alert delivery, and interactive charts.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     system = get_system()
-    reports = list(_read_recent_reports())
-    webhook_enabled = "ON" if Config.ALERT_WEBHOOK_URL else "OFF"
-    st.markdown(
-        f"""
-        <div class="metric-grid">
-            <div class="metric-card"><div class="metric-label">Default Market</div><div class="metric-value">{Config.DEFAULT_MARKET}</div></div>
-            <div class="metric-card"><div class="metric-label">Lookback</div><div class="metric-value">{Config.DEFAULT_LOOKBACK_DAYS}d</div></div>
-            <div class="metric-card"><div class="metric-label">Saved Reports</div><div class="metric-value">{len(reports)}</div></div>
-            <div class="metric-card"><div class="metric-label">Webhook</div><div class="metric-value">{webhook_enabled}</div></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     with st.sidebar:
         st.markdown("### Control Deck")
         st.caption("Run search and scan workflows from the browser.")
-        st.write({"market": Config.DEFAULT_MARKET, "lookback": Config.DEFAULT_LOOKBACK_DAYS, "report_limit": Config.DEFAULT_REPORT_LIMIT})
         st.markdown("---")
         st.caption("Launch")
         st.code("streamlit run ui/dashboard.py", language="bash")

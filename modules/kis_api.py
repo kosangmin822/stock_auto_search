@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -26,6 +26,8 @@ class KISAPIWrapper:
         self.session = requests.Session()
         self.access_token: Optional[str] = None
         self.token_type: str = "Bearer"
+        self._auth_failed_until: Optional[datetime] = None
+        self._quote_cache: Dict[str, Dict[str, Any]] = {}
         logger.info("KIS API Wrapper initialized")
 
     def authenticate(self) -> bool:
@@ -56,12 +58,16 @@ class KISAPIWrapper:
             logger.info("KIS API authentication successful")
             return True
         except Exception as exc:
+            self._auth_failed_until = datetime.now() + timedelta(minutes=3)
             logger.error("KIS API authentication failed: %s", exc)
             return False
 
     def _ensure_authenticated(self) -> bool:
         if self.access_token:
             return True
+        if self._auth_failed_until and datetime.now() < self._auth_failed_until:
+            logger.info("Skipping KIS authentication retry until cooldown expires")
+            return False
         logger.warning("Not authenticated. Attempting authentication...")
         return self.authenticate()
 
@@ -76,7 +82,7 @@ class KISAPIWrapper:
             "User-Agent": "Mozilla/5.0",
         }
 
-    def _get(self, path: str, tr_id: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _get(self, path: str, tr_id: str, params: Dict[str, Any], timeout: int = 10) -> Optional[Dict[str, Any]]:
         if not self._ensure_authenticated():
             return None
         try:
@@ -85,7 +91,7 @@ class KISAPIWrapper:
                 headers=self._build_headers(tr_id),
                 params=params,
                 verify=False,
-                timeout=10,
+                timeout=timeout,
             )
             response.raise_for_status()
             return response.json()
@@ -182,6 +188,58 @@ class KISAPIWrapper:
             .reset_index()
         )
         return aggregated
+
+    @staticmethod
+    def _to_number(value):
+        if value in (None, "", "-"):
+            return None
+        try:
+            numeric = float(value)
+        except Exception:
+            return value
+        if numeric.is_integer():
+            return int(numeric)
+        return numeric
+
+    def get_current_quote(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        stock_code = str(stock_code).zfill(6)
+        cached = self._quote_cache.get(stock_code)
+        if cached:
+            return dict(cached)
+
+        payload = self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            "FHKST01010100",
+            {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": stock_code,
+            },
+            timeout=3,
+        )
+        if not payload:
+            return None
+
+        output = payload.get("output") or {}
+        if not output:
+            logger.warning("No current quote payload returned for %s", stock_code)
+            return None
+
+        execution_strength = None
+        for key in ("tday_rltv", "cttr", "cpfn", "ccld_dvsn"):
+            if key in output and output.get(key) not in (None, ""):
+                execution_strength = self._to_number(output.get(key))
+                break
+
+        result = {
+            "trading_value": self._to_number(output.get("acml_tr_pbmn")),
+            "execution_strength": execution_strength,
+            "high_52w": self._to_number(output.get("w52_hgpr")),
+            "low_52w": self._to_number(output.get("w52_lwpr")),
+            "per": self._to_number(output.get("per")),
+            "pbr": self._to_number(output.get("pbr")),
+        }
+        self._quote_cache[stock_code] = dict(result)
+        return result
 
     def get_account_info(self):
         payload = self._get(

@@ -54,16 +54,37 @@ class StockAutoSearch:
         lookback_days: Optional[int] = None,
         period: str = "daily",
         minute_interval: int = 1,
+        full_history: bool = False,
     ):
         return self.stock_searcher.get_price_history(
             stock_code,
             period=period,
             lookback_days=lookback_days,
             minute_interval=minute_interval,
+            full_history=full_history,
         )
 
     def get_ticker_master(self, markets: Optional[list[str]] = None):
         return self.stock_searcher.get_ticker_master(markets=markets)
+
+    def get_market_benchmark_snapshot(
+        self,
+        market: str,
+        lookback_days: Optional[int] = None,
+    ):
+        return self.stock_searcher.get_market_benchmark_snapshot(market, lookback_days=lookback_days)
+
+    def get_market_benchmark_history(
+        self,
+        market: str,
+        lookback_days: Optional[int] = None,
+        full_history: bool = False,
+    ):
+        return self.stock_searcher.get_market_benchmark_history(
+            market,
+            lookback_days=lookback_days,
+            full_history=full_history,
+        )
 
     def get_top_gainers(self, limit: int = 10, market: Optional[str] = None, days: int = 1):
         return self.stock_searcher.get_top_gainers(limit=limit, market=market, days=days)
