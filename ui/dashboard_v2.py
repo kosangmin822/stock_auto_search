@@ -483,6 +483,7 @@ def _render_candlestick_chart(
           lockVisibleTimeRangeOnResize: true,
         }},
         crosshair: {{ mode: 0 }},
+        localization: {{ dateFormat: 'yyyy-MM-dd' }},
         handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
         handleScale: {{ mouseWheel: true, pinch: true, axisPressedMouseMove: {{ time: true, price: false }} }},
       }};
@@ -490,16 +491,19 @@ def _render_candlestick_chart(
 
     const priceChart = LightweightCharts.createChart(document.getElementById('price-pane'), paneStyle(360));
     const charts = [priceChart];
+    const intFmt = (price) => Math.round(price).toLocaleString('en-US');
+    const intPriceFmt = {{ type: 'custom', formatter: intFmt, minMove: 1 }};
     const candleSeries = priceChart.addCandlestickSeries({{
       upColor: '{RISE_COLOR}', downColor: '{FALL_COLOR}', borderVisible: false,
       wickUpColor: '{RISE_COLOR}', wickDownColor: '{FALL_COLOR}', priceLineVisible: false,
+      priceFormat: intPriceFmt,
     }});
     candleSeries.setData(payload.candles);
 
     const overlaySeriesMap = {{}};
     const overlayColors = {{ MA5:'#f97316', MA10:'#06b6d4', MA20:'#0f766e', MA60:'#7c3aed', BB_UPPER:'#94a3b8', BB_MID:'#64748b', BB_LOWER:'#94a3b8' }};
     Object.entries(payload.overlays || {{}}).forEach(([name, data]) => {{
-      const series = priceChart.addLineSeries({{ color: overlayColors[name] || '{LINE_COLOR}', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
+      const series = priceChart.addLineSeries({{ color: overlayColors[name] || '{LINE_COLOR}', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: intPriceFmt }});
       series.setData(data);
       overlaySeriesMap[name] = series;
     }});
@@ -529,9 +533,9 @@ def _render_candlestick_chart(
       document.getElementById('macd-wrap').style.display = 'block';
       macdChart = LightweightCharts.createChart(document.getElementById('macd-pane'), paneStyle(120));
       charts.push(macdChart);
-      macdSeries = macdChart.addLineSeries({{ color: '#0f766e', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
+      macdSeries = macdChart.addLineSeries({{ color: '#0f766e', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: intPriceFmt }});
       macdSeries.setData(payload.macd);
-      signalSeries = macdChart.addLineSeries({{ color: '#f97316', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }});
+      signalSeries = macdChart.addLineSeries({{ color: '#f97316', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: intPriceFmt }});
       signalSeries.setData(payload.macdSignal);
       macdSeries.createPriceLine({{ price: 0, color: '#d0d5dd', lineStyle: 2, lineWidth: 1, axisLabelVisible: false, title: '' }});
     }}
@@ -565,24 +569,40 @@ def _render_candlestick_chart(
       }}
       return buildTimeKey(time) || '';
     }}
-    function renderAllTooltips(param) {{
-      if (!param || !param.time || !param.point || param.point.x < 0 || param.point.y < 0) {{ hideAllTooltips(); return; }}
-      const timeKey = buildTimeKey(param.time); const candle = candleMap.get(timeKey); if (!candle) {{ hideAllTooltips(); return; }}
-      const priceLines = ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>', 'Open ' + formatInteger(candle.open) + ' | High ' + formatInteger(candle.high), 'Low ' + formatInteger(candle.low) + ' | Close ' + formatInteger(candle.close)];
+    function renderTooltipsByTimeKey(timeKey) {{
+      const candle = candleMap.get(timeKey); if (!candle) {{ hideAllTooltips(); return; }}
+      const priceLines = ['<div style="font-weight:700;margin-bottom:6px;">' + timeKey + '</div>', 'Open ' + formatInteger(candle.open) + ' | High ' + formatInteger(candle.high), 'Low ' + formatInteger(candle.low) + ' | Close ' + formatInteger(candle.close)];
       Object.entries(overlayMaps).forEach(([name, map]) => {{ const point = map.get(timeKey); if (point && point.value !== undefined) priceLines.push(name + ' ' + formatNumber(point.value)); }});
       showTooltip(priceTooltip, priceLines);
-      const volumePoint = volumeMap.get(timeKey); if (volumePoint && volumePoint.value !== undefined) showTooltip(volumeTooltip, ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>', 'Volume ' + formatInteger(volumePoint.value)]); else hideTooltip(volumeTooltip);
-      const rsiPoint = rsiMap.get(timeKey); if (rsiPoint && rsiPoint.value !== undefined) showTooltip(rsiTooltip, ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>', 'RSI14 ' + formatNumber(rsiPoint.value)]); else hideTooltip(rsiTooltip);
-      const macdPoint = macdMap.get(timeKey); const signalPoint = signalMap.get(timeKey); if ((macdPoint && macdPoint.value !== undefined) || (signalPoint && signalPoint.value !== undefined)) {{ const macdLines = ['<div style="font-weight:700;margin-bottom:6px;">' + formatDateLabel(param.time) + '</div>']; if (macdPoint && macdPoint.value !== undefined) macdLines.push('MACD ' + formatNumber(macdPoint.value)); if (signalPoint && signalPoint.value !== undefined) macdLines.push('Signal ' + formatNumber(signalPoint.value)); showTooltip(macdTooltip, macdLines); }} else hideTooltip(macdTooltip);
+      const volumePoint = volumeMap.get(timeKey); if (volumePoint && volumePoint.value !== undefined) showTooltip(volumeTooltip, ['<div style="font-weight:700;margin-bottom:6px;">' + timeKey + '</div>', 'Volume ' + formatInteger(volumePoint.value)]); else hideTooltip(volumeTooltip);
+      const rsiPoint = rsiMap.get(timeKey); if (rsiPoint && rsiPoint.value !== undefined) showTooltip(rsiTooltip, ['<div style="font-weight:700;margin-bottom:6px;">' + timeKey + '</div>', 'RSI14 ' + formatNumber(rsiPoint.value)]); else hideTooltip(rsiTooltip);
+      const macdPoint = macdMap.get(timeKey); const signalPoint = signalMap.get(timeKey); if ((macdPoint && macdPoint.value !== undefined) || (signalPoint && signalPoint.value !== undefined)) {{ const macdLines = ['<div style="font-weight:700;margin-bottom:6px;">' + timeKey + '</div>']; if (macdPoint && macdPoint.value !== undefined) macdLines.push('MACD ' + formatNumber(macdPoint.value)); if (signalPoint && signalPoint.value !== undefined) macdLines.push('Signal ' + formatNumber(signalPoint.value)); showTooltip(macdTooltip, macdLines); }} else hideTooltip(macdTooltip);
+    }}
+    function renderAllTooltips(param) {{
+      if (!param || !param.time || !param.point || param.point.x < 0 || param.point.y < 0) {{ hideAllTooltips(); return; }}
+      const timeKey = buildTimeKey(param.time); renderTooltipsByTimeKey(timeKey);
     }}
     charts.forEach((chart) => chart.subscribeCrosshairMove(renderAllTooltips));
     priceChart.subscribeCrosshairMove((param) => {{
-      if (crosshairSyncing || !syncChannel) return;
+      if (crosshairSyncing) return;
       if (param && param.time) {{
         const timeKey = buildTimeKey(param.time);
-        if (timeKey) syncChannel.postMessage({{ type: 'crosshair', source: payload.chartId, timeKey }});
+        const candle = candleMap.get(timeKey);
+        if (candle) {{
+          crosshairSyncing = true;
+          if (volumeChart && volumeSeries) {{ const vp = volumeMap.get(timeKey); if (vp) volumeChart.setCrosshairPosition(vp.value, candle.time, volumeSeries); }}
+          if (rsiChart && rsiSeries) {{ const rp = rsiMap.get(timeKey); if (rp) rsiChart.setCrosshairPosition(rp.value, candle.time, rsiSeries); }}
+          if (macdChart && macdSeries) {{ const mp = macdMap.get(timeKey); if (mp) macdChart.setCrosshairPosition(mp.value, candle.time, macdSeries); }}
+          crosshairSyncing = false;
+        }}
+        if (!syncing && syncChannel && timeKey) syncChannel.postMessage({{ type: 'crosshair', source: payload.chartId, timeKey }});
       }} else {{
-        syncChannel.postMessage({{ type: 'crosshair_clear', source: payload.chartId }});
+        crosshairSyncing = true;
+        if (volumeChart) volumeChart.clearCrosshairPosition();
+        if (rsiChart) rsiChart.clearCrosshairPosition();
+        if (macdChart) macdChart.clearCrosshairPosition();
+        crosshairSyncing = false;
+        if (!syncing && syncChannel) syncChannel.postMessage({{ type: 'crosshair_clear', source: payload.chartId }});
       }}
     }});
 
@@ -597,12 +617,14 @@ def _render_candlestick_chart(
     }}
     function rangeKey(range) {{ if (!range || !range.from || !range.to) return ''; return serializeTime(range.from) + ':' + serializeTime(range.to); }}
     function applyRange(range) {{ if (!range || !range.from || !range.to) return; syncing = true; lastRangeKey = rangeKey(range); charts.forEach((chart) => chart.timeScale().setVisibleRange(range)); syncing = false; }}
-    priceChart.timeScale().subscribeVisibleTimeRangeChange((range) => {{
-      if (syncing || !range || !range.from || !range.to) return;
-      const key = rangeKey(range);
-      if (!key || key === lastRangeKey) return;
-      applyRange(range);
-      if (syncChannel) syncChannel.postMessage({{ type: 'range', source: payload.chartId, range, key }});
+    charts.forEach((chart) => {{
+      chart.timeScale().subscribeVisibleTimeRangeChange((range) => {{
+        if (syncing || !range || !range.from || !range.to) return;
+        const key = rangeKey(range);
+        if (!key || key === lastRangeKey) return;
+        applyRange(range);
+        if (syncChannel) syncChannel.postMessage({{ type: 'range', source: payload.chartId, range, key }});
+      }});
     }});
     if (syncChannel) {{
       syncChannel.onmessage = (event) => {{
@@ -621,6 +643,7 @@ def _render_candlestick_chart(
           if (rsiChart && rsiSeries) {{ const rp = rsiMap.get(message.timeKey); if (rp) rsiChart.setCrosshairPosition(rp.value, candle.time, rsiSeries); }}
           if (macdChart && macdSeries) {{ const mp = macdMap.get(message.timeKey); if (mp) macdChart.setCrosshairPosition(mp.value, candle.time, macdSeries); }}
           crosshairSyncing = false;
+          renderTooltipsByTimeKey(message.timeKey);
         }} else if (message.type === 'crosshair_clear') {{
           crosshairSyncing = true;
           priceChart.clearCrosshairPosition();
@@ -628,6 +651,7 @@ def _render_candlestick_chart(
           if (rsiChart) rsiChart.clearCrosshairPosition();
           if (macdChart) macdChart.clearCrosshairPosition();
           crosshairSyncing = false;
+          hideAllTooltips();
         }}
       }};
     }}
@@ -652,7 +676,122 @@ def _normalize_recent_ohlcv(rows: List[Dict[str, object]]) -> pd.DataFrame:
     for index, label in enumerate(labels):
         if index < len(columns):
             rename_map[columns[index]] = label
-    return frame.rename(columns=rename_map)
+    frame = frame.rename(columns=rename_map)
+
+    # Sort newest first
+    if "Date" in frame.columns:
+        frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+        frame = frame.sort_values("Date", ascending=False).reset_index(drop=True)
+        frame["Date"] = frame["Date"].dt.strftime("%Y-%m-%d")
+
+    def _fmt_int(x: object) -> str:
+        try:
+            return f"{round(float(x)):,}"
+        except (TypeError, ValueError):
+            return "-"
+
+    def _fmt_vol(x: object) -> str:
+        try:
+            return f"{int(float(x)):,}"
+        except (TypeError, ValueError):
+            return "-"
+
+    def _fmt_pct(x: object) -> str:
+        try:
+            return f"{float(x):.2f}%"
+        except (TypeError, ValueError):
+            return "-"
+
+    for col in ["Open", "High", "Low", "Close"]:
+        if col in frame.columns:
+            frame[col] = frame[col].apply(_fmt_int)
+    if "Volume" in frame.columns:
+        frame["Volume"] = frame["Volume"].apply(_fmt_vol)
+    if "Change %" in frame.columns:
+        frame["Change %"] = frame["Change %"].apply(_fmt_pct)
+
+    return frame
+
+
+def _render_ohlcv_table(
+    df: pd.DataFrame,
+    table_key: str,
+    sync_group: Optional[str] = None,
+    height: int = 260,
+) -> None:
+    if df.empty:
+        return
+
+    headers = list(df.columns)
+    th_style_left  = "padding:7px 12px;text-align:left;font-weight:600;font-size:12px;color:#374151;white-space:nowrap;border-bottom:2px solid #d1d5db;"
+    th_style_right = "padding:7px 12px;text-align:right;font-weight:600;font-size:12px;color:#374151;white-space:nowrap;border-bottom:2px solid #d1d5db;"
+    header_html = "".join(
+        f'<th style="{th_style_left if i == 0 else th_style_right}">{h}</th>'
+        for i, h in enumerate(headers)
+    )
+
+    rows_html = ""
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        bg = "#ffffff" if row_idx % 2 == 0 else "#f3f4f6"
+        cells = ""
+        for col_idx, val in enumerate(row):
+            align = "left" if col_idx == 0 else "right"
+            color = "#374151"
+            if headers[col_idx] == "Change %":
+                try:
+                    color = "#d65a31" if float(str(val).replace("%", "")) >= 0 else "#3b82f6"
+                except (ValueError, TypeError):
+                    pass
+            td = f'padding:5px 12px;text-align:{align};font-size:12px;color:{color};white-space:nowrap;border-bottom:1px solid #e9ecef;'
+            cells += f'<td style="{td}">{val}</td>'
+        rows_html += f'<tr style="background:{bg};">{cells}</tr>'
+
+    payload_js = json.dumps({"tableId": table_key, "syncGroup": sync_group or ""})
+    html = f"""
+    <div id="tw" style="overflow-y:auto;height:{height}px;border:1px solid #e4e7ec;border-radius:8px;font-family:'Noto Sans KR',sans-serif;">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead style="position:sticky;top:0;z-index:1;background:#f8fafc;">
+          <tr>{header_html}</tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </div>
+    <script>
+    (function() {{
+      const p = {payload_js};
+      const wrap = document.getElementById('tw');
+      const ch = (p.syncGroup && typeof BroadcastChannel !== 'undefined')
+        ? new BroadcastChannel('stock_auto_search_tbl_' + p.syncGroup) : null;
+      let syncing = false;
+      let syncTimer = null;
+      let throttleTimer = null;
+      wrap.addEventListener('scroll', () => {{
+        if (syncing || !ch) return;
+        if (throttleTimer) return;
+        throttleTimer = setTimeout(() => {{
+          throttleTimer = null;
+          if (syncing) return;
+          const max = wrap.scrollHeight - wrap.clientHeight;
+          if (max <= 0) return;
+          ch.postMessage({{ type: 'tbl_scroll', src: p.tableId, ratio: wrap.scrollTop / max }});
+        }}, 30);
+      }});
+      if (ch) {{
+        ch.onmessage = (e) => {{
+          const m = e.data || {{}};
+          if (m.src === p.tableId || m.type !== 'tbl_scroll') return;
+          if (syncTimer) clearTimeout(syncTimer);
+          syncing = true;
+          requestAnimationFrame(() => {{
+            wrap.scrollTop = m.ratio * (wrap.scrollHeight - wrap.clientHeight);
+            syncTimer = setTimeout(() => {{ syncing = false; }}, 100);
+          }});
+        }};
+      }}
+    }})();
+    </script>
+    """
+    components.html(html, height=height + 4, scrolling=False)
 
 
 def _build_search_preview(report: Dict[str, object]) -> str:
@@ -899,8 +1038,7 @@ def _render_snapshot_card(
     st.dataframe(moving_avg_metrics, width="stretch", hide_index=True)
     _render_chart_panel(item, chart_options=chart_options, chart_prefix=chart_prefix, sync_group=sync_group)
     recent = _normalize_recent_ohlcv(item.get("recent_ohlcv") or [])
-    if not recent.empty:
-        st.dataframe(recent, width="stretch", hide_index=True)
+    _render_ohlcv_table(recent, table_key=f"tbl_{chart_prefix}", sync_group=sync_group)
 
 
 def _render_compare_controls(control_key: str) -> Dict[str, object]:

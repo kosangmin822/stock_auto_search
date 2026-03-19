@@ -989,7 +989,7 @@ class PyKRXWrapper:
         change = current_price - previous_close
         change_rate = (change / previous_close * 100) if previous_close else 0.0
 
-        _recent_full = ohlcv.tail(5).reset_index()
+        _recent_full = ohlcv.tail(120).reset_index()
         _keep = [c for c in ['날짜', '시가', '고가', '저가', '종가', '거래량'] if c in _recent_full.columns]
         recent = _recent_full[_keep].copy()
         fundamentals = None
@@ -1349,7 +1349,7 @@ class PyKRXWrapper:
             else self._empty_frame(["code"])
         )
 
-        recent = ohlcv.tail(5).reset_index().copy()
+        recent = ohlcv.tail(120).reset_index().copy()
         if "???" in recent.columns:
             recent["???"] = recent["???"].astype(str)
 
